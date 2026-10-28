@@ -1,4 +1,4 @@
-import { EntityManager } from "@mikro-orm/core";
+import { EntityManager, LockMode } from "@mikro-orm/core";
 import { ConflictException, Injectable, NotFoundException } from "@nestjs/common";
 import { createHash } from "node:crypto";
 import { randomUUID } from "node:crypto";
@@ -65,7 +65,11 @@ export class WageringApplicationService {
     };
 
     await this.em.transactional(async (tx: EntityManager) => {
-      const wallet = await tx.findOne(WalletEntity, { id: input.walletId });
+      const wallet = await tx.findOne(
+        WalletEntity,
+        { id: input.walletId },
+        { lockMode: LockMode.PESSIMISTIC_WRITE },
+      );
       if (!wallet) {
         throw new NotFoundException("Wallet not found");
       }

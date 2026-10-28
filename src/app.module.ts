@@ -7,10 +7,18 @@ import { WalletController } from "./controllers/wallet.controller";
 import { WageringController } from "./controllers/wagering.controller";
 import { WalletApplicationService } from "./application/wallet/wallet-application.service";
 import { WageringApplicationService } from "./application/wagering/wagering-application.service";
+import { InboxMessageService } from "./infrastructure/messaging/inbox-message.service";
+import { OutboxProcessorService } from "./infrastructure/messaging/outbox-processor.service";
 
 @Module({
   imports: [MikroOrmModule.forRoot(ormConfig)],
   controllers: [HealthController, WalletController, WageringController],
-  providers: [GretterService, WalletApplicationService, WageringApplicationService],
+  providers: [
+    GretterService,
+    WalletApplicationService,
+    WageringApplicationService,
+    InboxMessageService,
+    OutboxProcessorService,
+  ],
 })
 export class AppModule {}

@@ -114,6 +114,8 @@ export class WageringApplicationService {
         oneTx.processedAt = new Date();
         oneTx.observedBalance = next.toJSON().amount;
 
+        await tx.flush();
+
         tx.create(WalletLedgerEntryEntity, {
           id: randomUUID(),
           walletId: wallet.id,
@@ -136,6 +138,8 @@ export class WageringApplicationService {
         oneTx.status = "PROCESSED";
         oneTx.processedAt = new Date();
         oneTx.observedBalance = next.toJSON().amount;
+
+        await tx.flush();
 
         tx.create(WalletLedgerEntryEntity, {
           id: randomUUID(),

@@ -38,6 +38,8 @@ export class WalletApplicationService {
         updatedAt: new Date(),
       });
 
+      await tx.flush();
+
       if (!money.isZero()) {
         const transactionId = randomUUID();
         const openingTx = tx.create(WagerTransactionEntity, {

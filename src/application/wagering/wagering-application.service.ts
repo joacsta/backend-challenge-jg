@@ -7,6 +7,8 @@ import { WalletEntity } from "../../infrastructure/persistence/entities/wallet.e
 import { WagerTransactionEntity } from "../../infrastructure/persistence/entities/wager-transaction.entity";
 import { WalletLedgerEntryEntity } from "../../infrastructure/persistence/entities/wallet-ledger-entry.entity";
 import { OutboxMessageEntity } from "../../infrastructure/persistence/entities/outbox-message.entity";
+import { MetricsService } from "../../infrastructure/observability/metrics.service";
+import { StructuredLoggerService } from "../../infrastructure/observability/structured-logger.service";
 
 export interface SubmitWagerInput {
   providerId: string;
@@ -22,7 +24,11 @@ export interface SubmitWagerInput {
 
 @Injectable()
 export class WageringApplicationService {
-  constructor(private readonly em: EntityManager) {}
+  constructor(
+    private readonly em: EntityManager,
+    private readonly metrics: MetricsService = new MetricsService(),
+    private readonly logger: StructuredLoggerService = new StructuredLoggerService(),
+  ) {}
 
   async findTransactionById(transactionId: string) {
     const transaction = await this.em.findOne(WagerTransactionEntity, { id: transactionId });
@@ -90,9 +96,12 @@ export class WageringApplicationService {
 
     if (resolvedExisting) {
       if (resolvedExisting.payloadHash !== payloadHash) {
+        this.metrics.increment("idempotency.payload_conflict");
+        this.logger.warn("idempotency.payload_conflict", { idempotencyKey, providerId: input.providerId, externalTransactionId: input.externalTransactionId });
         throw new ConflictException("Idempotency key already used with different payload");
       }
 
+      this.metrics.increment("idempotency.replay");
       return {
         transactionId: resolvedExisting.id,
         status: resolvedExisting.status,
@@ -127,9 +136,12 @@ export class WageringApplicationService {
       const current = currentByKey ?? currentByExternalId;
       if (current) {
         if (current.payloadHash !== payloadHash) {
+          this.metrics.increment("idempotency.payload_conflict");
+          this.logger.warn("idempotency.payload_conflict", { idempotencyKey, providerId: input.providerId, externalTransactionId: input.externalTransactionId });
           throw new ConflictException("Idempotency key already used with different payload");
         }
 
+        this.metrics.increment("idempotency.replay");
         result = {
           transactionId: current.id,
           status: current.status,
@@ -165,6 +177,7 @@ export class WageringApplicationService {
           oneTx.failureCode = "INSUFFICIENT_FUNDS";
           oneTx.processedAt = new Date();
           oneTx.observedBalance = wallet.balance;
+          this.metrics.increment("wager.transaction.rejected");
           await tx.flush();
           result = {
             transactionId: oneTx.id,
@@ -272,6 +285,15 @@ export class WageringApplicationService {
         oneTx.observedBalance = wallet.balance;
       }
 
+      this.metrics.increment("wager.transaction.processed");
+      this.logger.log("wager.transaction.processed", {
+        transactionId: oneTx.id,
+        walletId: wallet.id,
+        providerId: input.providerId,
+        externalTransactionId: input.externalTransactionId,
+        status: oneTx.status,
+        amount: amount.toJSON().amount,
+      });
       await tx.flush();
       result = {
         transactionId: oneTx.id,

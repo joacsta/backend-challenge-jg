@@ -14,10 +14,13 @@ import { OutboxWorkerService } from "./infrastructure/messaging/outbox-worker.se
 import { InboxWorkerService } from "./infrastructure/messaging/inbox-worker.service";
 import { SqsInboxConsumerService } from "./infrastructure/messaging/sqs-inbox-consumer.service";
 import { SqsTransportService } from "./infrastructure/messaging/sqs-transport.service";
+import { MetricsController } from "./controllers/metrics.controller";
+import { MetricsService } from "./infrastructure/observability/metrics.service";
+import { StructuredLoggerService } from "./infrastructure/observability/structured-logger.service";
 
 @Module({
   imports: [MikroOrmModule.forRoot(ormConfig)],
-  controllers: [HealthController, WalletController, WageringController, QueueController],
+  controllers: [HealthController, WalletController, WageringController, QueueController, MetricsController],
   providers: [
     GretterService,
     WalletApplicationService,
@@ -28,6 +31,8 @@ import { SqsTransportService } from "./infrastructure/messaging/sqs-transport.se
     SqsTransportService,
     SqsInboxConsumerService,
     InboxWorkerService,
+    MetricsService,
+    StructuredLoggerService,
   ],
 })
 export class AppModule {}

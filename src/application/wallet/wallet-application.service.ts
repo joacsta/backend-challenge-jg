@@ -6,6 +6,8 @@ import { WalletEntity } from "../../infrastructure/persistence/entities/wallet.e
 import { WagerTransactionEntity } from "../../infrastructure/persistence/entities/wager-transaction.entity";
 import { WalletLedgerEntryEntity } from "../../infrastructure/persistence/entities/wallet-ledger-entry.entity";
 import { OutboxMessageEntity } from "../../infrastructure/persistence/entities/outbox-message.entity";
+import { MetricsService } from "../../infrastructure/observability/metrics.service";
+import { StructuredLoggerService } from "../../infrastructure/observability/structured-logger.service";
 
 export interface CreateWalletInput {
   playerId: string;
@@ -14,9 +16,13 @@ export interface CreateWalletInput {
 
 @Injectable()
 export class WalletApplicationService {
-  constructor(private readonly em: EntityManager) {}
+  constructor(
+    private readonly em: EntityManager,
+    private readonly metrics: MetricsService = new MetricsService(),
+    private readonly logger: StructuredLoggerService = new StructuredLoggerService(),
+  ) {}
 
-  async createWallet(input: CreateWalletInput) {
+  async createWallet(input: CreateWalletInput, correlationId?: string) {
     const money = Money.from(input.initialBalance);
 
     return this.em.transactional(async (tx: EntityManager) => {
@@ -26,6 +32,8 @@ export class WalletApplicationService {
       });
 
       if (existing) {
+        this.metrics.increment("wallet.duplicate");
+        this.logger.warn("wallet.create.duplicate", { correlationId, playerId: input.playerId, currency: money.currency });
         throw new ConflictException("Wallet already exists for this player and currency");
       }
 
@@ -40,6 +48,7 @@ export class WalletApplicationService {
       });
 
       await tx.flush();
+      this.metrics.increment("wallet.created");
 
       if (!money.isZero()) {
         const transactionId = randomUUID();
@@ -96,6 +105,13 @@ export class WalletApplicationService {
       }
 
       await tx.flush();
+      this.logger.log("wallet.created", {
+        correlationId,
+        walletId: wallet.id,
+        playerId: wallet.playerId,
+        currency: wallet.currency,
+        version: wallet.version,
+      });
 
       return {
         id: wallet.id,

@@ -38,6 +38,8 @@ export class InboxMessageService {
         throw new ConflictException("Message payload hash mismatch for the same consumer/message id");
       }
 
+      existing.processedAt ??= new Date();
+      await tx.flush();
       return true;
     });
   }

@@ -40,19 +40,26 @@ export class WageringApplicationService {
       referenceExternalTransactionId: input.referenceExternalTransactionId,
     });
 
-    const existing = await this.em.findOne(WagerTransactionEntity, {
+    const existingByKey = await this.em.findOne(WagerTransactionEntity, {
       idempotencyKey,
     });
 
-    if (existing) {
-      if (existing.payloadHash !== payloadHash) {
+    const existingByExternalId = await this.em.findOne(WagerTransactionEntity, {
+      providerId: input.providerId,
+      externalTransactionId: input.externalTransactionId,
+    });
+
+    const resolvedExisting = existingByKey ?? existingByExternalId;
+
+    if (resolvedExisting) {
+      if (resolvedExisting.payloadHash !== payloadHash) {
         throw new ConflictException("Idempotency key already used with different payload");
       }
 
       return {
-        transactionId: existing.id,
-        status: existing.status,
-        balance: { amount: existing.observedBalance ?? "0.00", currency: existing.currency },
+        transactionId: resolvedExisting.id,
+        status: resolvedExisting.status,
+        balance: { amount: resolvedExisting.observedBalance ?? "0.00", currency: resolvedExisting.currency },
         idempotentReplay: true,
       };
     }
@@ -72,6 +79,27 @@ export class WageringApplicationService {
       );
       if (!wallet) {
         throw new NotFoundException("Wallet not found");
+      }
+
+      const currentByKey = await tx.findOne(WagerTransactionEntity, { idempotencyKey });
+      const currentByExternalId = await tx.findOne(WagerTransactionEntity, {
+        providerId: input.providerId,
+        externalTransactionId: input.externalTransactionId,
+      });
+
+      const current = currentByKey ?? currentByExternalId;
+      if (current) {
+        if (current.payloadHash !== payloadHash) {
+          throw new ConflictException("Idempotency key already used with different payload");
+        }
+
+        result = {
+          transactionId: current.id,
+          status: current.status,
+          balance: { amount: current.observedBalance ?? "0.00", currency: current.currency },
+          idempotentReplay: true,
+        };
+        return;
       }
 
       const amount = Money.from(input.money);

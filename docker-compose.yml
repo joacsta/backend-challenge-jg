@@ -15,10 +15,18 @@ services:
       timeout: 3s
       retries: 10
 
-  ministack:
-    image: ministackorg/ministack
+  localstack:
+    image: localstack/localstack:3
     ports:
       - "4566:4566"
+    environment:
+      SERVICES: sqs
+      AWS_DEFAULT_REGION: us-east-1
+      HOSTNAME_EXTERNAL: localhost
+    volumes:
+      - ./localstack-init:/etc/localstack/init/ready.d
+      - localstackdata:/var/lib/localstack
 
 volumes:
   pgdata:
+  localstackdata:

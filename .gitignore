@@ -1,0 +1,37 @@
+README-BUN.md
+README-COPILOT.md
+
+# runtime / package manager
+node_modules/
+.bun/
+
+# build output
+dist/
+build/
+out/
+*.tgz
+
+# env files
+.env
+.env.*
+!.env.example
+
+# logs and reports
+logs/
+*.log
+coverage/
+*.lcov
+.nyc_output/
+
+# caches
+.cache/
+.eslintcache
+*.tsbuildinfo
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# local infra data
+pgdata/

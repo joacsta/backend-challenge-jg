@@ -6,6 +6,7 @@ import { Money } from "../../domain/money/money";
 import { WalletEntity } from "../../infrastructure/persistence/entities/wallet.entity";
 import { WagerTransactionEntity } from "../../infrastructure/persistence/entities/wager-transaction.entity";
 import { WalletLedgerEntryEntity } from "../../infrastructure/persistence/entities/wallet-ledger-entry.entity";
+import { OutboxMessageEntity } from "../../infrastructure/persistence/entities/outbox-message.entity";
 
 export interface SubmitWagerInput {
   providerId: string;
@@ -127,6 +128,27 @@ export class WageringApplicationService {
           balanceAfter: next.toJSON().amount,
           createdAt: new Date(),
         });
+
+        tx.create(OutboxMessageEntity, {
+          id: randomUUID(),
+          aggregateId: wallet.id,
+          eventType: "wallet.balance.changed",
+          payload: {
+            walletId: wallet.id,
+            playerId: wallet.playerId,
+            currency: wallet.currency,
+            walletVersion: wallet.version,
+            transactionId: oneTx.id,
+            direction: "DEBIT",
+            amount: amount.toJSON().amount,
+            balanceBefore: before.toJSON().amount,
+            balanceAfter: next.toJSON().amount,
+          },
+          occurredAt: new Date(),
+          attempts: 0,
+          nextAttemptAt: new Date(),
+          publishedAt: null,
+        });
       }
 
       if (input.kind === "WIN") {
@@ -151,6 +173,27 @@ export class WageringApplicationService {
           balanceBefore: before.toJSON().amount,
           balanceAfter: next.toJSON().amount,
           createdAt: new Date(),
+        });
+
+        tx.create(OutboxMessageEntity, {
+          id: randomUUID(),
+          aggregateId: wallet.id,
+          eventType: "wallet.balance.changed",
+          payload: {
+            walletId: wallet.id,
+            playerId: wallet.playerId,
+            currency: wallet.currency,
+            walletVersion: wallet.version,
+            transactionId: oneTx.id,
+            direction: "CREDIT",
+            amount: amount.toJSON().amount,
+            balanceBefore: before.toJSON().amount,
+            balanceAfter: next.toJSON().amount,
+          },
+          occurredAt: new Date(),
+          attempts: 0,
+          nextAttemptAt: new Date(),
+          publishedAt: null,
         });
       }
 

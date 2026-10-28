@@ -5,6 +5,7 @@ import { Money, type MoneyProps } from "../../domain/money/money";
 import { WalletEntity } from "../../infrastructure/persistence/entities/wallet.entity";
 import { WagerTransactionEntity } from "../../infrastructure/persistence/entities/wager-transaction.entity";
 import { WalletLedgerEntryEntity } from "../../infrastructure/persistence/entities/wallet-ledger-entry.entity";
+import { OutboxMessageEntity } from "../../infrastructure/persistence/entities/outbox-message.entity";
 
 export interface CreateWalletInput {
   playerId: string;
@@ -61,6 +62,8 @@ export class WalletApplicationService {
           processedAt: new Date(),
         });
 
+        await tx.flush();
+
         tx.create(WalletLedgerEntryEntity, {
           id: randomUUID(),
           walletId: wallet.id,
@@ -71,6 +74,24 @@ export class WalletApplicationService {
           balanceBefore: "0.00",
           balanceAfter: money.toJSON().amount,
           createdAt: new Date(),
+        });
+
+        tx.create(OutboxMessageEntity, {
+          id: randomUUID(),
+          aggregateId: wallet.id,
+          eventType: "wallet.created",
+          payload: {
+            walletId: wallet.id,
+            playerId: wallet.playerId,
+            currency: wallet.currency,
+            balance: wallet.balance,
+            transactionId: openingTx.id,
+            version: wallet.version,
+          },
+          occurredAt: new Date(),
+          attempts: 0,
+          nextAttemptAt: new Date(),
+          publishedAt: null,
         });
       }
 

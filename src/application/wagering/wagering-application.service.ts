@@ -24,6 +24,43 @@ export interface SubmitWagerInput {
 export class WageringApplicationService {
   constructor(private readonly em: EntityManager) {}
 
+  async findTransactionById(transactionId: string) {
+    const transaction = await this.em.findOne(WagerTransactionEntity, { id: transactionId });
+    if (!transaction) {
+      throw new NotFoundException("Transaction not found");
+    }
+
+    return {
+      id: transaction.id,
+      providerId: transaction.providerId,
+      externalTransactionId: transaction.externalTransactionId,
+      walletId: transaction.walletId,
+      playerId: transaction.playerId,
+      roundId: transaction.roundId,
+      gameId: transaction.gameId,
+      kind: transaction.kind,
+      amount: { amount: transaction.amount, currency: transaction.currency },
+      status: transaction.status,
+      failureCode: transaction.failureCode,
+      observedBalance: transaction.observedBalance ? { amount: transaction.observedBalance, currency: transaction.currency } : null,
+      createdAt: transaction.createdAt,
+      processedAt: transaction.processedAt,
+    };
+  }
+
+  async findTransactionByProviderReference(providerId: string, externalTransactionId: string) {
+    const transaction = await this.em.findOne(WagerTransactionEntity, {
+      providerId,
+      externalTransactionId,
+    });
+
+    if (!transaction) {
+      throw new NotFoundException("Transaction not found for provider reference");
+    }
+
+    return this.findTransactionById(transaction.id);
+  }
+
   async submitWager(input: SubmitWagerInput, idempotencyKeyHeader?: string) {
     const idempotencyKey =
       idempotencyKeyHeader ?? `${input.providerId}:${input.externalTransactionId}`;
@@ -248,7 +285,29 @@ export class WageringApplicationService {
   }
 
   makePayloadHash(payload: Record<string, unknown>): string {
-    const canonical = JSON.stringify(payload, Object.keys(payload).sort());
-    return createHash("sha256").update(canonical).digest("hex");
+    return createHash("sha256").update(this.stableStringify(payload)).digest("hex");
+  }
+
+  private stableStringify(value: unknown): string {
+    if (value === undefined) {
+      return "null";
+    }
+
+    if (value === null) {
+      return "null";
+    }
+
+    if (Array.isArray(value)) {
+      return `[${value.map((item) => this.stableStringify(item)).join(",")}]`;
+    }
+
+    if (typeof value === "object") {
+      const entries = Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, nested]) => `${JSON.stringify(key)}:${this.stableStringify(nested)}`);
+      return `{${entries.join(",")}}`;
+    }
+
+    return JSON.stringify(value);
   }
 }

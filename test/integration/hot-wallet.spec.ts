@@ -76,4 +76,36 @@ describe("hot wallet concurrency", () => {
     expect(Number(finalWallet!.balance)).toBeGreaterThanOrEqual(0);
     expect(Number(finalWallet!.balance)).toBeLessThan(100);
   });
+
+  test("rejects the same idempotency key when the payload changes", async () => {
+    const playerId = randomUUID();
+    const walletService = new WalletApplicationService(orm.em.fork());
+    const wallet = await walletService.createWallet({
+      playerId,
+      initialBalance: { amount: "100.00", currency: "BRL" },
+    });
+
+    const service = new WageringApplicationService(orm.em.fork());
+    const validPayload = {
+      providerId: "provider-a",
+      externalTransactionId: "same-key-conflict",
+      playerId,
+      walletId: wallet.id,
+      roundId: "round-1",
+      gameId: "game-1",
+      kind: "BET" as const,
+      money: { amount: "20.00", currency: "BRL" },
+    };
+
+    await expect(
+      service.submitWager(validPayload, "provider-a:same-key-conflict"),
+    ).resolves.toMatchObject({ status: "PROCESSED" });
+
+    await expect(
+      service.submitWager(
+        { ...validPayload, money: { amount: "30.00", currency: "BRL" } },
+        "provider-a:same-key-conflict",
+      ),
+    ).rejects.toThrow("Idempotency key already used with different payload");
+  });
 });

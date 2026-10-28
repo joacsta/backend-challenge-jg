@@ -7,6 +7,7 @@ export interface OutboxPublicationResult {
   id: string;
   eventType: string;
   published: boolean;
+  deadLettered?: boolean;
   publishedAt?: Date;
   nextAttemptAt?: Date;
   attempts: number;
@@ -14,6 +15,8 @@ export interface OutboxPublicationResult {
 
 @Injectable()
 export class OutboxProcessorService {
+  private readonly maxAttempts = Number(process.env.OUTBOX_MAX_ATTEMPTS ?? "5");
+
   constructor(
     private readonly em: EntityManager,
     private readonly sqsTransport: SqsTransportService,
@@ -55,6 +58,22 @@ export class OutboxProcessorService {
         } catch (error) {
           const nextAttempts = attemptsBefore + 1;
           message.attempts = nextAttempts;
+
+          if (nextAttempts >= this.maxAttempts) {
+            await this.sqsTransport.publishDeadLetter(message);
+            message.publishedAt = now;
+            message.nextAttemptAt = now;
+            results.push({
+              id: message.id,
+              eventType: message.eventType,
+              published: false,
+              deadLettered: true,
+              publishedAt: message.publishedAt,
+              attempts: message.attempts,
+            });
+            continue;
+          }
+
           message.nextAttemptAt = this.calculateNextAttemptAt(nextAttempts, now);
           results.push({
             id: message.id,

@@ -128,6 +128,53 @@ export class WalletApplicationService {
     return wallet;
   }
 
+  async findLedger(walletId: string, cursor?: string, limit = 50) {
+    const wallet = await this.findWalletEntityById(walletId);
+    const items = await this.em.find(
+      WalletLedgerEntryEntity,
+      { walletId: wallet.id },
+      {
+        limit: Math.min(Math.max(limit, 1), 100),
+        orderBy: { createdAt: "ASC" },
+      },
+    );
+
+    return {
+      walletId: wallet.id,
+      cursor: cursor ?? null,
+      items: items.map((entry) => ({
+        id: entry.id,
+        transactionId: entry.transactionId,
+        direction: entry.direction,
+        amount: { amount: entry.amount, currency: entry.currency },
+        balanceBefore: { amount: entry.balanceBefore, currency: entry.currency },
+        balanceAfter: { amount: entry.balanceAfter, currency: entry.currency },
+        createdAt: entry.createdAt,
+      })),
+    };
+  }
+
+  async reconcileWallet(
+    walletId: string,
+    storedBalance: MoneyProps,
+    calculatedBalance: MoneyProps,
+  ) {
+    const wallet = await this.findWalletEntityById(walletId);
+    const stored = Money.from(storedBalance);
+    const calculated = Money.from(calculatedBalance);
+    const difference = stored.subtract(calculated);
+    const consistent = stored.equals(calculated);
+
+    return {
+      walletId: wallet.id,
+      storedBalance: { amount: stored.toJSON().amount, currency: stored.currency },
+      calculatedBalance: { amount: calculated.toJSON().amount, currency: calculated.currency },
+      difference: { amount: difference.toJSON().amount, currency: difference.currency },
+      consistent,
+      checkedEntries: await this.em.count(WalletLedgerEntryEntity, { walletId: wallet.id }),
+    };
+  }
+
   async updateBalanceFromLedger(wallet: WalletEntity, delta: string, direction: "DEBIT" | "CREDIT") {
     const current = Money.from({ amount: wallet.balance, currency: wallet.currency });
     const deltaMoney = Money.from({ amount: delta, currency: wallet.currency });

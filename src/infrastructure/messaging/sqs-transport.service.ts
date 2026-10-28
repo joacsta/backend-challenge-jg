@@ -63,4 +63,39 @@ export class SqsTransportService {
       })
       .promise();
   }
+
+  async publishDeadLetter(message: OutboxMessageEntity, reason = "max-retries-exceeded"): Promise<void> {
+    if (!this.client || !process.env.AWS_SQS_OUTBOX_DLQ_URL) {
+      return;
+    }
+
+    const queueUrl = process.env.AWS_SQS_OUTBOX_DLQ_URL!;
+    const body = JSON.stringify({
+      id: message.id,
+      aggregateId: message.aggregateId,
+      eventType: message.eventType,
+      payload: message.payload,
+      occurredAt: message.occurredAt,
+      attempts: message.attempts,
+      reason,
+      dlq: true,
+    });
+
+    await this.client
+      .sendMessage({
+        QueueUrl: queueUrl,
+        MessageBody: body,
+        MessageAttributes: {
+          eventType: {
+            DataType: "String",
+            StringValue: message.eventType,
+          },
+          reason: {
+            DataType: "String",
+            StringValue: reason,
+          },
+        },
+      })
+      .promise();
+  }
 }

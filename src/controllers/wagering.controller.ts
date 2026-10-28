@@ -1,13 +1,13 @@
-import { Body, Controller, Headers, Param, Post } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Get, Headers, Param, Post } from "@nestjs/common";
 import { WageringApplicationService } from "../application/wagering/wagering-application.service";
 
-@Controller("wagering")
+@Controller()
 export class WageringController {
   constructor(private readonly wageringApplicationService: WageringApplicationService) {}
 
-  @Post("transactions")
+  @Post("wagering/transactions")
   async submitTransaction(
-    @Headers("idempotency-key") idempotencyKeyHeader: string,
+    @Headers("idempotency-key") idempotencyKeyHeader?: string,
     @Body() body: {
       providerId: string;
       externalTransactionId: string;
@@ -20,6 +20,23 @@ export class WageringController {
       referenceExternalTransactionId?: string;
     },
   ) {
+    if (!idempotencyKeyHeader) {
+      throw new BadRequestException("Idempotency-Key header is required");
+    }
+
     return this.wageringApplicationService.submitWager(body, idempotencyKeyHeader);
+  }
+
+  @Get("wagering/transactions/:transactionId")
+  async getTransaction(@Param("transactionId") transactionId: string) {
+    return this.wageringApplicationService.findTransactionById(transactionId);
+  }
+
+  @Get("providers/:providerId/wagering/transactions/:externalTransactionId")
+  async getTransactionByProviderReference(
+    @Param("providerId") providerId: string,
+    @Param("externalTransactionId") externalTransactionId: string,
+  ) {
+    return this.wageringApplicationService.findTransactionByProviderReference(providerId, externalTransactionId);
   }
 }

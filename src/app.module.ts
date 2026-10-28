@@ -10,6 +10,8 @@ import { WalletApplicationService } from "./application/wallet/wallet-applicatio
 import { WageringApplicationService } from "./application/wagering/wagering-application.service";
 import { InboxMessageService } from "./infrastructure/messaging/inbox-message.service";
 import { OutboxProcessorService } from "./infrastructure/messaging/outbox-processor.service";
+import { OutboxWorkerService } from "./infrastructure/messaging/outbox-worker.service";
+import { InboxWorkerService } from "./infrastructure/messaging/inbox-worker.service";
 import { SqsInboxConsumerService } from "./infrastructure/messaging/sqs-inbox-consumer.service";
 import { SqsTransportService } from "./infrastructure/messaging/sqs-transport.service";
 
@@ -22,8 +24,10 @@ import { SqsTransportService } from "./infrastructure/messaging/sqs-transport.se
     WageringApplicationService,
     InboxMessageService,
     OutboxProcessorService,
+    OutboxWorkerService,
     SqsTransportService,
     SqsInboxConsumerService,
+    InboxWorkerService,
   ],
 })
 export class AppModule {}

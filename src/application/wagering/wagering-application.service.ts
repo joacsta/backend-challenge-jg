@@ -98,6 +98,7 @@ export class WageringApplicationService {
     idempotencyKeyHeader?: string,
     transactionManager?: EntityManager,
   ) {
+    const startedAt = Date.now();
     const idempotencyKey =
       idempotencyKeyHeader ??
       `${input.providerId}:${input.externalTransactionId}`;
@@ -518,12 +519,12 @@ export class WageringApplicationService {
         ),
       );
       this.logger.log("wager.transaction.processed", {
+        correlationId: this.eventContext(input).correlationId,
         transactionId: oneTx.id,
         walletId: wallet.id,
         providerId: input.providerId,
         externalTransactionId: input.externalTransactionId,
         status: oneTx.status,
-        amount: amount.toJSON().amount,
       });
       await tx.flush();
       result = {
@@ -534,13 +535,30 @@ export class WageringApplicationService {
       };
     };
 
-    if (transactionManager) {
-      await process(transactionManager);
-    } else {
-      await this.em.transactional(process);
+    try {
+      if (transactionManager) {
+        await process(transactionManager);
+      } else {
+        await this.em.transactional(process);
+      }
+    } catch (error) {
+      if (this.isLockConflict(error)) {
+        this.metrics.increment("wallet.lock_conflict");
+      }
+      throw error;
     }
 
+    this.metrics.observe("wager.processing_latency_ms", Date.now() - startedAt);
+    this.metrics.increment(`wager.status.${result!.status.toLowerCase()}`);
     return result!;
+  }
+
+  private isLockConflict(error: unknown): boolean {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? String(error.code)
+        : "";
+    return code === "55P03" || code === "40P01";
   }
 
   async processPendingReferences(limit = 25): Promise<number> {

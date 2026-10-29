@@ -11,6 +11,11 @@ export class MetricsService {
     return next;
   }
 
+  observe(name: string, value: number): void {
+    this.increment(`${name}.count`);
+    this.increment(`${name}.sum`, value);
+  }
+
   snapshot(): Record<string, number> {
     return Object.fromEntries(
       [...this.counters.entries()].sort(([left], [right]) =>

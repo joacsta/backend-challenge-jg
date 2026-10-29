@@ -225,6 +225,17 @@ Sem atomicidade, o sistema fica inconsistente e difícil de recuperar.
 
 Esse conjunto é a base da integridade do sistema financeiro.
 
+## 10. Reconciliação e observabilidade
+
+A reconciliação usa o saldo materializado apenas como valor armazenado e
+reconstrói o saldo somando o ledger imutável. Divergências geram resposta
+inconsistente, log estruturado e métrica.
+
+As métricas expostas em `/metrics` incluem status de transações, replays,
+conflitos de payload, redelivery, retries, DLQ, conflitos de lock, latência de
+processamento e atraso do outbox. Os logs são JSON e carregam identificadores
+operacionais, sem registrar o valor financeiro completo da operação.
+
 ---
 
 ## 8. Outbox e Inbox
@@ -259,6 +270,26 @@ A chave geralmente é composta por:
 - ID da mensagem
 
 Isso é importante porque filas e mensagerias podem entregar a mesma mensagem mais de uma vez.
+
+### 8.3 Eventos versionados
+
+Os eventos publicados pelo outbox usam subclasses de `IntegrationEvent`, cada uma
+com `eventType` e `version` definidos no próprio tipo. O envelope contém
+`eventId`, `aggregateId`, `correlationId`, `causationId`, `occurredAt`, `version`
+e `data`. Valores monetários são serializados como `{ amount, currency }`, nunca
+como instâncias de `Money`.
+
+### 8.4 Falhas e encerramento
+
+Mensagens de negócio são reconhecidas sem retry; mensagens inválidas ou erros
+permanentes são encaminhados para a DLQ após o limite configurado por
+`INBOX_MAX_ATTEMPTS`. Erros transitórios permanecem invisíveis apenas durante o
+visibility timeout e podem ser entregues novamente. Os workers interrompem novos
+polls no `SIGTERM`, aguardam o ciclo ativo e só então encerram.
+
+Publishers do outbox usam lock pessimista no lote selecionado. Assim, publishers
+concorrentes aguardam o commit do primeiro worker e não selecionam novamente os
+registros já publicados.
 
 ---
 

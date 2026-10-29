@@ -5,6 +5,9 @@ import { WalletApplicationService } from "../../src/application/wallet/wallet-ap
 import { WalletEntity } from "../../src/infrastructure/persistence/entities/wallet.entity";
 import { WalletLedgerEntryEntity } from "../../src/infrastructure/persistence/entities/wallet-ledger-entry.entity";
 import { WagerTransactionEntity } from "../../src/infrastructure/persistence/entities/wager-transaction.entity";
+import { OutboxMessageEntity } from "../../src/infrastructure/persistence/entities/outbox-message.entity";
+import { OutboxProcessorService } from "../../src/infrastructure/messaging/outbox-processor.service";
+import { MetricsService } from "../../src/infrastructure/observability/metrics.service";
 import ormConfig from "../../src/infrastructure/persistence/mikro-orm.config";
 
 describe("hot wallet concurrency", () => {
@@ -79,6 +82,52 @@ describe("hot wallet concurrency", () => {
     expect(Number(finalWallet!.balance)).toBeLessThan(100);
   });
 
+  test("keeps the balance correct across three application instances", async () => {
+    const playerId = randomUUID();
+    const walletService = new WalletApplicationService(orm.em.fork());
+    const wallet = await walletService.createWallet({
+      playerId,
+      initialBalance: { amount: "100.00", currency: "BRL" },
+    });
+    const services = [1, 2, 3].map(
+      () => new WageringApplicationService(orm.em.fork()),
+    );
+
+    const results = await Promise.all(
+      services.map((service, index) =>
+        service.submitWager(
+          {
+            providerId: `provider-instance-${index}`,
+            externalTransactionId: `instance-${index}`,
+            playerId,
+            walletId: wallet.id,
+            roundId: "round-instances",
+            gameId: "game",
+            kind: "BET",
+            money: { amount: "40.00", currency: "BRL" },
+          },
+          `provider-instance-${index}:instance-${index}`,
+        ),
+      ),
+    );
+
+    const finalWallet = await orm.em.fork().findOne(WalletEntity, {
+      id: wallet.id,
+    });
+    const entries = await orm.em.fork().find(WalletLedgerEntryEntity, {
+      walletId: wallet.id,
+    });
+
+    expect(results.filter((result) => result.status === "PROCESSED").length).toBe(
+      2,
+    );
+    expect(results.filter((result) => result.status === "REJECTED").length).toBe(
+      1,
+    );
+    expect(finalWallet?.balance).toBe("20.00");
+    expect(entries.length).toBe(3);
+  });
+
   test("rejects the same idempotency key when the payload changes", async () => {
     const playerId = randomUUID();
     const walletService = new WalletApplicationService(orm.em.fork());
@@ -118,6 +167,94 @@ describe("hot wallet concurrency", () => {
     expect(conflictMessage).toBe(
       "Idempotency key already used with different payload",
     );
+  });
+
+  test("processes 50 duplicate requests with a single debit", async () => {
+    const playerId = randomUUID();
+    const walletService = new WalletApplicationService(orm.em.fork());
+    const wallet = await walletService.createWallet({
+      playerId,
+      initialBalance: { amount: "100.00", currency: "BRL" },
+    });
+    const requests = Array.from({ length: 50 }, () =>
+      new WageringApplicationService(orm.em.fork()).submitWager(
+        {
+          providerId: "provider-duplicates",
+          externalTransactionId: "duplicate-50",
+          playerId,
+          walletId: wallet.id,
+          roundId: "round-duplicates",
+          gameId: "game",
+          kind: "BET",
+          money: { amount: "25.00", currency: "BRL" },
+        },
+        "provider-duplicates:duplicate-50",
+      ),
+    );
+
+    const results = await Promise.all(requests);
+    const processed = results.filter(
+      (result) => result.status === "PROCESSED" && !result.idempotentReplay,
+    );
+    const replays = results.filter((result) => result.idempotentReplay);
+    const finalWallet = await orm.em.fork().findOne(WalletEntity, {
+      id: wallet.id,
+    });
+    const entries = await orm.em.fork().find(WalletLedgerEntryEntity, {
+      walletId: wallet.id,
+    });
+
+    expect(processed.length).toBe(1);
+    expect(replays.length).toBe(49);
+    expect(finalWallet?.balance).toBe("75.00");
+    expect(entries.length).toBe(2);
+  });
+
+  test("does not publish the same outbox message twice with concurrent publishers", async () => {
+    await orm.em.getConnection().execute("DELETE FROM outbox_messages");
+    const message = orm.em.fork().create(OutboxMessageEntity, {
+      id: randomUUID(),
+      aggregateId: randomUUID(),
+      eventType: "TestEvent",
+      payload: { eventId: randomUUID() },
+      occurredAt: new Date(),
+      attempts: 0,
+      nextAttemptAt: new Date(),
+      publishedAt: null,
+    });
+    const seedEm = orm.em.fork();
+    seedEm.persist(message);
+    await seedEm.flush();
+
+    let publishCount = 0;
+    const transport = {
+      publish: async () => {
+        publishCount += 1;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      },
+      publishDeadLetter: async () => undefined,
+    };
+    const first = new OutboxProcessorService(
+      orm.em.fork(),
+      transport as never,
+      new MetricsService(),
+    );
+    const second = new OutboxProcessorService(
+      orm.em.fork(),
+      transport as never,
+      new MetricsService(),
+    );
+
+    await Promise.all([
+      first.publishNextPending(),
+      second.publishNextPending(),
+    ]);
+
+    expect(publishCount).toBe(1);
+    const persisted = await orm.em.fork().findOne(OutboxMessageEntity, {
+      id: message.id,
+    });
+    expect(persisted?.publishedAt).toBeDefined();
   });
 
   test("refunds a processed bet only once", async () => {

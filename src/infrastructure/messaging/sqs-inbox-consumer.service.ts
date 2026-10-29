@@ -15,6 +15,7 @@ import {
   type SubmitWagerInput,
 } from "../../application/wagering/wagering-application.service";
 import { SqsTransportService } from "./sqs-transport.service";
+import { MetricsService } from "../observability/metrics.service";
 
 @Injectable()
 export class SqsInboxConsumerService {
@@ -24,6 +25,7 @@ export class SqsInboxConsumerService {
     private readonly inboxMessageService: InboxMessageService,
     private readonly wageringApplicationService: WageringApplicationService,
     private readonly sqsTransport: SqsTransportService,
+    private readonly metrics: MetricsService,
   ) {
     const queueUrl = process.env.AWS_SQS_INBOX_URL;
     if (!queueUrl) {
@@ -72,6 +74,7 @@ export class SqsInboxConsumerService {
     const messages = result.Messages ?? [];
 
     for (const message of messages) {
+      const startedAt = Date.now();
       const attempts = Number(
         message.Attributes?.ApproximateReceiveCount ?? "1",
       );
@@ -114,9 +117,12 @@ export class SqsInboxConsumerService {
         );
 
         await this.deleteMessage(queueUrl, message.ReceiptHandle);
+        this.metrics.increment("inbox.processed");
+        this.metrics.observe("inbox.latency_ms", Date.now() - startedAt);
       } catch (error) {
         if (this.isBusinessError(error)) {
           await this.deleteMessage(queueUrl, message.ReceiptHandle);
+          this.metrics.increment("inbox.business_ack");
           continue;
         }
 
@@ -131,6 +137,9 @@ export class SqsInboxConsumerService {
             error instanceof Error ? error.message : "permanent-error",
           );
           await this.deleteMessage(queueUrl, message.ReceiptHandle);
+          this.metrics.increment("inbox.dlq");
+        } else {
+          this.metrics.increment("inbox.retry");
         }
       }
 

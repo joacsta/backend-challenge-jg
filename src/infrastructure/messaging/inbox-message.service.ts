@@ -2,6 +2,7 @@ import { EntityManager } from "@mikro-orm/core";
 import { ConflictException, Injectable } from "@nestjs/common";
 import { createHash } from "node:crypto";
 import { InboxMessageEntity } from "../persistence/entities/inbox-message.entity";
+import { MetricsService } from "../observability/metrics.service";
 
 export interface InboxEnvelope<T> {
   consumerName: string;
@@ -16,7 +17,10 @@ export type InboxMessageHandler<T> = (
 
 @Injectable()
 export class InboxMessageService {
-  constructor(private readonly em: EntityManager) {}
+  constructor(
+    private readonly em: EntityManager,
+    private readonly metrics: MetricsService,
+  ) {}
 
   async consume<T>(
     envelope: InboxEnvelope<T>,
@@ -36,6 +40,7 @@ export class InboxMessageService {
             "Message payload hash mismatch for the same consumer/message id",
           );
         }
+        this.metrics.increment("inbox.redelivery");
         return true;
       }
 
@@ -50,6 +55,7 @@ export class InboxMessageService {
       }
 
       if (existing && existing.payloadHash !== payloadHash) {
+        this.metrics.increment("inbox.payload_conflict");
         throw new ConflictException(
           "Message payload hash mismatch for the same consumer/message id",
         );

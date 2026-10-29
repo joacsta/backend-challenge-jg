@@ -12,6 +12,21 @@ O foco não é apenas expor endpoints de API. O foco é garantir que:
 - cada alteração de saldo tenha um registro no livro contábil (ledger);
 - eventos de integração só sejam emitidos depois que a transação financeira foi confirmada.
 
+## 1.1 Autorização HTTP
+
+As rotas financeiras e de operação usam chaves de serviço fornecidas por variáveis
+de ambiente e enviadas no header `x-api-key`. `ADMIN_API_KEY` protege abertura e
+reconciliação de carteiras, `PROVIDER_API_KEY` protege transações e consultas de
+provedores, `API_KEY` protege consultas e `INTERNAL_API_KEY` protege operações de
+fila. A identidade do provedor também precisa ser enviada em `x-provider-id` e
+coincidir com o payload ou o caminho, além de estar listada em
+`ALLOWED_PROVIDER_IDS`.
+
+As mensagens recebidas diretamente da fila continuam sendo tratadas como canal
+interno confiável, conforme o escopo do desafio. Endpoints HTTP de fila não devem
+ser expostos publicamente e exigem `INTERNAL_API_KEY`. Em produção, endpoints SQS
+não locais precisam usar HTTPS.
+
 ---
 
 ## 2. Visão geral do problema

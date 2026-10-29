@@ -1,13 +1,25 @@
-import { Body, Controller, Get, Param, Post, Query } from "@nestjs/common";
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Post,
+  Query,
+  UseGuards,
+} from "@nestjs/common";
 import { WalletApplicationService } from "../application/wallet/wallet-application.service";
+import { ApiKeyGuard } from "../auth/api-key.guard";
+import { RequireApiKey } from "../auth/require-api-key.decorator";
 
 @Controller("wallets")
+@UseGuards(ApiKeyGuard)
 export class WalletController {
   constructor(
     private readonly walletApplicationService: WalletApplicationService,
   ) {}
 
   @Post()
+  @RequireApiKey("ADMIN_API_KEY")
   async createWallet(
     @Body()
     body: {
@@ -22,11 +34,13 @@ export class WalletController {
   }
 
   @Get(":walletId")
+  @RequireApiKey("API_KEY")
   async getWallet(@Param("walletId") walletId: string) {
     return this.walletApplicationService.findById(walletId);
   }
 
   @Get(":walletId/ledger")
+  @RequireApiKey("API_KEY")
   async getLedger(
     @Param("walletId") walletId: string,
     @Query("cursor") cursor?: string,
@@ -40,6 +54,7 @@ export class WalletController {
   }
 
   @Post(":walletId/reconciliation")
+  @RequireApiKey("ADMIN_API_KEY")
   async reconcileWallet(
     @Param("walletId") walletId: string,
     @Body()

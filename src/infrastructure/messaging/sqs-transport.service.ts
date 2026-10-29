@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import * as AWS from "aws-sdk";
 import { OutboxMessageEntity } from "../persistence/entities/outbox-message.entity";
+import { getSqsEndpoint, isSqsTlsEnabled } from "./sqs-endpoint";
 
 @Injectable()
 export class SqsTransportService {
@@ -13,12 +14,13 @@ export class SqsTransportService {
       return;
     }
 
+    const endpoint = getSqsEndpoint();
     this.client = new AWS.SQS({
       region: process.env.AWS_REGION ?? "us-east-1",
-      endpoint: process.env.AWS_SQS_ENDPOINT ?? "http://localhost:4566",
+      endpoint,
       accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? "test",
       secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? "test",
-      sslEnabled: false,
+      sslEnabled: isSqsTlsEnabled(endpoint),
     });
   }
 

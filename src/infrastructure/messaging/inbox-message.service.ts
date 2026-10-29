@@ -3,6 +3,7 @@ import { ConflictException, Injectable } from "@nestjs/common";
 import { createHash } from "node:crypto";
 import { InboxMessageEntity } from "../persistence/entities/inbox-message.entity";
 import { MetricsService } from "../observability/metrics.service";
+import { stableStringify } from "../../shared/stable-stringify";
 
 export interface InboxEnvelope<T> {
   consumerName: string;
@@ -77,14 +78,8 @@ export class InboxMessageService {
   }
 
   private payloadHash(payload: unknown): string {
-    const normalized =
-      payload && typeof payload === "object" && !Array.isArray(payload)
-        ? JSON.stringify(
-            payload,
-            Object.keys(payload as Record<string, unknown>).sort(),
-          )
-        : JSON.stringify(payload);
-
-    return createHash("sha256").update(normalized).digest("hex");
+    return createHash("sha256")
+      .update(stableStringify(payload))
+      .digest("hex");
   }
 }

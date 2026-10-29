@@ -308,26 +308,42 @@ describe("rotas HTTP financeiras", () => {
     ).toBeGreaterThanOrEqual(0);
   });
 
-  test("quando a referência de REFUND não existe, então a transação fica pendente", async () => {
+  test("quando a referência de REFUND não existe, então a transação fica pendente e o replay mantém a resposta", async () => {
     const playerId = randomUUID();
     const wallet = await request(
       baseUrl,
       "/wallets",
       post(walletPayload(playerId)),
     );
-    const response = await request(
+    const key = `http:${randomUUID()}`;
+    const payload = wagerPayload(wallet.body.id, playerId, {
+      kind: "REFUND",
+      referenceExternalTransactionId: "missing-reference",
+    });
+
+    const first = await request(
       baseUrl,
       "/wagering/transactions",
-      post(
-        wagerPayload(wallet.body.id, playerId, {
-          kind: "REFUND",
-          referenceExternalTransactionId: "missing-reference",
-        }),
-        { "idempotency-key": `http:${randomUUID()}` },
-      ),
+      post(payload, { "idempotency-key": key }),
     );
-    expect(response.status).toBe(202);
-    expect(response.body.status).toBe("PENDING_REFERENCE");
+    const replay = await request(
+      baseUrl,
+      "/wagering/transactions",
+      post(payload, { "idempotency-key": key }),
+    );
+
+    expect(first.status).toBe(202);
+    expect(first.body.status).toBe("PENDING_REFERENCE");
+    expect(first.body.balance.amount).toBe("100.00");
+    expect(replay.status).toBe(202);
+    expect(replay.body.status).toBe("PENDING_REFERENCE");
+    expect(replay.body.balance.amount).toBe("100.00");
+    expect(replay.body.idempotentReplay).toBe(true);
+
+    const stored = await orm.em.fork().findOne(WagerTransactionEntity, {
+      id: first.body.transactionId,
+    });
+    expect(stored?.attempts).toBe(1);
   });
 
   test("quando o ledger é consultado com cursor inválido, então rejeita a requisição", async () => {
@@ -397,6 +413,34 @@ describe("rotas HTTP financeiras", () => {
     expect(first.body).toBeFalsy();
     expect(second.status).toBe(201);
     expect(second.body).toBeTruthy();
+  });
+
+  test("quando o mesmo evento de inbox chega duas vezes ao mesmo tempo, então ele é processado uma vez", async () => {
+    const payload = {
+      consumerName: "http-concurrent-inbox",
+      messageId: randomUUID(),
+      payload: { operation: "debit", data: { amount: "10.00" } },
+    };
+
+    const responses = await Promise.all([
+      request(baseUrl, "/queues/inbox/consume", post(payload)),
+      request(baseUrl, "/queues/inbox/consume", post(payload)),
+    ]);
+
+    expect(responses.every((response) => response.status === 201)).toBe(true);
+    expect(responses.filter((response) => response.body === false).length).toBe(
+      1,
+    );
+    expect(responses.filter((response) => response.body === true).length).toBe(
+      1,
+    );
+
+    const rows = await orm.em.fork().find(InboxMessageEntity, {
+      consumerName: payload.consumerName,
+      messageId: payload.messageId,
+    });
+    expect(rows.length).toBe(1);
+    expect(rows[0]?.processedAt).toBeDefined();
   });
 
   test("quando a mesma chave chega para carteiras diferentes, então apenas uma é processada", async () => {

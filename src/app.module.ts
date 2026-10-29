@@ -18,6 +18,8 @@ import { SqsTransportService } from "./infrastructure/messaging/sqs-transport.se
 import { MetricsController } from "./controllers/metrics.controller";
 import { MetricsService } from "./infrastructure/observability/metrics.service";
 import { StructuredLoggerService } from "./infrastructure/observability/structured-logger.service";
+import { ApiKeyGuard } from "./auth/api-key.guard";
+import { Reflector } from "@nestjs/core";
 
 @Module({
   imports: [MikroOrmModule.forRoot(ormConfig)],
@@ -41,6 +43,8 @@ import { StructuredLoggerService } from "./infrastructure/observability/structur
     ReferenceWorkerService,
     MetricsService,
     StructuredLoggerService,
+    Reflector,
+    ApiKeyGuard,
   ],
 })
 export class AppModule {}

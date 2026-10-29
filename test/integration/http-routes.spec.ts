@@ -19,12 +19,31 @@ const request = async (
   path: string,
   init?: RequestInit,
 ): Promise<HttpResponse> => {
+  const parsedBody =
+    typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : {};
+  const apiKey = path.startsWith("/queues")
+    ? process.env.INTERNAL_API_KEY
+    : path.startsWith("/wagering") || path.startsWith("/providers")
+      ? process.env.PROVIDER_API_KEY
+      : init?.method === "POST" &&
+          (path === "/wallets" || path.endsWith("/reconciliation"))
+        ? process.env.ADMIN_API_KEY
+        : process.env.API_KEY;
+  const providerHeaders =
+    typeof parsedBody.providerId === "string"
+      ? { "x-provider-id": parsedBody.providerId }
+      : {};
   const response = await fetch(`${baseUrl}${path}`, {
     ...init,
-    headers: { "content-type": "application/json", ...init?.headers },
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": apiKey!,
+      ...providerHeaders,
+      ...init?.headers,
+    } as Record<string, string>,
   });
-  const body = await response.json();
-  return { status: response.status, body };
+  const responseBody = await response.json();
+  return { status: response.status, body: responseBody };
 };
 
 const post = (
@@ -59,6 +78,12 @@ describe("rotas HTTP financeiras", () => {
   let baseUrl: string;
 
   beforeAll(async () => {
+    process.env.API_KEY = "test-read-key";
+    process.env.ADMIN_API_KEY = "test-admin-key";
+    process.env.PROVIDER_API_KEY = "test-provider-key";
+    process.env.ALLOWED_PROVIDER_IDS = "provider-http";
+    process.env.INTERNAL_API_KEY = "test-internal-key";
+    process.env.NODE_ENV = "test";
     app = await NestFactory.create(AppModule);
     await app.init();
     await app.listen(0);
@@ -81,6 +106,30 @@ describe("rotas HTTP financeiras", () => {
 
   afterAll(async () => {
     await app.close();
+  });
+
+  test("quando a carteira é acessada sem uma chave válida, então rejeita", async () => {
+    const response = await request(
+      baseUrl,
+      `/wallets/${randomUUID()}`,
+      { method: "GET", headers: { "x-api-key": "invalid" } },
+    );
+    expect(response.status).toBe(401);
+  });
+
+  test("quando a identidade do provedor diverge do payload, então rejeita", async () => {
+    const response = await request(
+      baseUrl,
+      "/wagering/transactions",
+      post(
+        wagerPayload(randomUUID(), randomUUID()),
+        {
+          "idempotency-key": `http:${randomUUID()}`,
+          "x-provider-id": "different-provider",
+        },
+      ),
+    );
+    expect(response.status).toBe(400);
   });
 
   test("quando os dados são válidos, então cria a carteira e registra o saldo inicial", async () => {

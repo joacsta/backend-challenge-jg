@@ -575,24 +575,27 @@ export class WageringApplicationService {
     );
 
     for (const transaction of due) {
-      await this.submitWager(
-        {
-          providerId: transaction.providerId,
-          externalTransactionId: transaction.externalTransactionId,
-          playerId: transaction.playerId,
-          walletId: transaction.walletId,
-          roundId: transaction.roundId,
-          gameId: transaction.gameId,
-          kind: transaction.kind as SubmitWagerInput["kind"],
-          money: {
-            amount: transaction.amount,
-            currency: transaction.currency,
+      await workerEm.transactional((transactionEm) =>
+        this.submitWager(
+          {
+            providerId: transaction.providerId,
+            externalTransactionId: transaction.externalTransactionId,
+            playerId: transaction.playerId,
+            walletId: transaction.walletId,
+            roundId: transaction.roundId,
+            gameId: transaction.gameId,
+            kind: transaction.kind as SubmitWagerInput["kind"],
+            money: {
+              amount: transaction.amount,
+              currency: transaction.currency,
+            },
+            referenceExternalTransactionId:
+              transaction.referenceExternalTransactionId ?? undefined,
+            correlationId: transaction.idempotencyKey,
           },
-          referenceExternalTransactionId:
-            transaction.referenceExternalTransactionId ?? undefined,
-          correlationId: transaction.idempotencyKey,
-        },
-        transaction.idempotencyKey,
+          transaction.idempotencyKey,
+          transactionEm,
+        ),
       );
     }
 

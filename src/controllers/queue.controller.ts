@@ -1,11 +1,15 @@
-import { Body, Controller, Post } from "@nestjs/common";
+import { Body, Controller, Post, UseGuards } from "@nestjs/common";
 import {
   InboxMessageService,
   type InboxEnvelope,
 } from "../infrastructure/messaging/inbox-message.service";
 import { OutboxProcessorService } from "../infrastructure/messaging/outbox-processor.service";
+import { ApiKeyGuard } from "../auth/api-key.guard";
+import { RequireApiKey } from "../auth/require-api-key.decorator";
 
 @Controller("queues")
+@UseGuards(ApiKeyGuard)
+@RequireApiKey("INTERNAL_API_KEY")
 export class QueueController {
   constructor(
     private readonly outboxProcessor: OutboxProcessorService,

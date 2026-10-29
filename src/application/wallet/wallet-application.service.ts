@@ -245,7 +245,7 @@ export class WalletApplicationService {
           ? this.encodeLedgerCursor(lastSeq)
           : null,
       items: items.map((entry) => ({
-        seq: entry.seq,
+        seq: entry.seq === null ? null : String(entry.seq),
         id: entry.id,
         transactionId: entry.transactionId,
         direction: entry.direction,

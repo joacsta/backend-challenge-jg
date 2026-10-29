@@ -60,6 +60,11 @@ Esperado: `wallets`, `wager_transactions`, `wallet_ledger_entries`, `inbox_messa
 ## Passo 3: subir a aplicação (terminal 1)
 
 ```bash
+export API_KEY=demo-read-key
+export ADMIN_API_KEY=demo-admin-key
+export PROVIDER_API_KEY=demo-provider-key
+export INTERNAL_API_KEY=demo-internal-key
+export ALLOWED_PROVIDER_IDS=provider-a
 bun run src/main.ts
 ```
 
@@ -75,14 +80,39 @@ bash
 
 ```bash
 export API=http://localhost:3000
+export API_KEY=demo-read-key
+export ADMIN_API_KEY=demo-admin-key
+export PROVIDER_API_KEY=demo-provider-key
+export INTERNAL_API_KEY=demo-internal-key
 export RUN=$(date +%s)
 export PLAYER_ID=$(cat /proc/sys/kernel/random/uuid)
 pj() { python3 -m json.tool; }
 psqlc() { docker compose exec -T postgres psql -U wagering -d wagering -c "$1"; }
+curl() {
+  local api_key="$API_KEY"
+  local provider_header=()
+  local command_line="$*"
+
+  if [[ "$command_line" == *"/queues/"* ]]; then
+    api_key="$INTERNAL_API_KEY"
+  elif [[ "$command_line" == *"/wagering/"* || "$command_line" == *"/providers/"* ]]; then
+    api_key="$PROVIDER_API_KEY"
+    provider_header=(-H "x-provider-id: provider-a")
+  elif [[ "$command_line" == *"-X POST"*"/wallets"* || "$command_line" == *"/reconciliation"* ]]; then
+    api_key="$ADMIN_API_KEY"
+  fi
+
+  command curl -H "x-api-key: $api_key" "${provider_header[@]}" "$@"
+}
 echo "RUN=$RUN PLAYER_ID=$PLAYER_ID"
 ```
 
 `psqlc "..."` é um atalho para rodar SQL no banco. Cada execução usa `RUN` e `PLAYER_ID` novos, então pode repetir a demo quantas vezes quiser.
+
+O wrapper `curl` acrescenta automaticamente `x-api-key` conforme a rota e
+`x-provider-id: provider-a` nas chamadas do provedor. As chaves acima são
+somente credenciais locais de demonstração; em produção use valores fortes
+fornecidos pelo ambiente de execução.
 
 ## Passo 5: saúde da aplicação
 
@@ -354,6 +384,7 @@ export BODY50="{\"providerId\":\"provider-a\",\"externalTransactionId\":\"same-$
 
 ```bash
 seq 1 50 | xargs -P 50 -I{} curl -s -o /dev/null -w "%{http_code}\n" -X POST $API/wagering/transactions \
+  -H "x-api-key: $PROVIDER_API_KEY" -H "x-provider-id: provider-a" \
   -H "Content-Type: application/json" -H "Idempotency-Key: provider-a:same-$RUN" -d "$BODY50" | sort | uniq -c
 ```
 

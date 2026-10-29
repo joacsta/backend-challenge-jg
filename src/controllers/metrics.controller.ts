@@ -3,10 +3,10 @@ import { MetricsService } from "../infrastructure/observability/metrics.service"
 
 @Controller()
 export class MetricsController {
-  constructor(private readonly metrics: MetricsService) {}
+  constructor(private readonly metricsService: MetricsService) {}
 
   @Get("metrics")
-  async metrics() {
-    return this.metrics.snapshot();
+  async getMetrics() {
+    return this.metricsService.snapshot();
   }
 }

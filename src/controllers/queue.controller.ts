@@ -1,5 +1,8 @@
 import { Body, Controller, Post } from "@nestjs/common";
-import { InboxMessageService, type InboxEnvelope } from "../infrastructure/messaging/inbox-message.service";
+import {
+  InboxMessageService,
+  type InboxEnvelope,
+} from "../infrastructure/messaging/inbox-message.service";
 import { OutboxProcessorService } from "../infrastructure/messaging/outbox-processor.service";
 
 @Controller("queues")
@@ -15,7 +18,9 @@ export class QueueController {
   }
 
   @Post("inbox/consume")
-  async consumeInbox(@Body() body: { consumerName: string; messageId: string; payload: unknown }) {
+  async consumeInbox(
+    @Body() body: { consumerName: string; messageId: string; payload: unknown },
+  ) {
     const envelope: InboxEnvelope<unknown> = {
       consumerName: body.consumerName,
       messageId: body.messageId,

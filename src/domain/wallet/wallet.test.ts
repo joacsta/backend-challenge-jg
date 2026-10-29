@@ -22,7 +22,10 @@ describe("Money", () => {
     const b = Money.from({ amount: "25.50", currency: "BRL" });
 
     expect(a.add(b).toJSON()).toEqual({ amount: "125.50", currency: "BRL" });
-    expect(a.subtract(b).toJSON()).toEqual({ amount: "74.50", currency: "BRL" });
+    expect(a.subtract(b).toJSON()).toEqual({
+      amount: "74.50",
+      currency: "BRL",
+    });
   });
 });
 
@@ -34,7 +37,10 @@ describe("Wallet", () => {
       initialBalance: Money.from({ amount: "100.00", currency: "BRL" }),
     });
 
-    expect(wallet.balance.toJSON()).toEqual({ amount: "100.00", currency: "BRL" });
+    expect(wallet.balance.toJSON()).toEqual({
+      amount: "100.00",
+      currency: "BRL",
+    });
     expect(wallet.version).toBe(1);
   });
 
@@ -46,11 +52,17 @@ describe("Wallet", () => {
     });
 
     wallet.credit(Money.from({ amount: "25.00", currency: "BRL" }));
-    expect(wallet.balance.toJSON()).toEqual({ amount: "125.00", currency: "BRL" });
+    expect(wallet.balance.toJSON()).toEqual({
+      amount: "125.00",
+      currency: "BRL",
+    });
     expect(wallet.version).toBe(2);
 
     wallet.debit(Money.from({ amount: "20.00", currency: "BRL" }));
-    expect(wallet.balance.toJSON()).toEqual({ amount: "105.00", currency: "BRL" });
+    expect(wallet.balance.toJSON()).toEqual({
+      amount: "105.00",
+      currency: "BRL",
+    });
     expect(wallet.version).toBe(3);
   });
 

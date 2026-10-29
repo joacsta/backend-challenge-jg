@@ -20,6 +20,12 @@ export enum WagerTransactionStatus {
 export type FailureCode =
   | "INSUFFICIENT_FUNDS"
   | "INVALID_REFERENCE"
+  | "REFERENCE_NOT_FOUND"
+  | "REFERENCE_MISMATCH"
+  | "INVALID_REFERENCE_KIND"
+  | "REFERENCE_AMOUNT_MISMATCH"
+  | "ALREADY_REVERSED"
+  | "REVERSAL_INSUFFICIENT_FUNDS"
   | "INVALID_MONEY"
   | "IDEMPOTENCY_CONFLICT"
   | "RULE_REJECTION"
@@ -87,7 +93,9 @@ export class WagerTransaction {
       props.kind === WagerTransactionKind.Rollback
     ) {
       if (!props.referenceExternalTransactionId) {
-        throw new Error("Refund and rollback require referenceExternalTransactionId");
+        throw new Error(
+          "Refund and rollback require referenceExternalTransactionId",
+        );
       }
     }
 

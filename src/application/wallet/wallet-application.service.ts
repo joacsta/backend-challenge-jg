@@ -1,5 +1,10 @@
 import { EntityManager, wrap } from "@mikro-orm/core";
-import { ConflictException, Injectable, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import { Money, type MoneyProps } from "../../domain/money/money";
 import { WalletEntity } from "../../infrastructure/persistence/entities/wallet.entity";
@@ -8,6 +13,10 @@ import { WalletLedgerEntryEntity } from "../../infrastructure/persistence/entiti
 import { OutboxMessageEntity } from "../../infrastructure/persistence/entities/outbox-message.entity";
 import { MetricsService } from "../../infrastructure/observability/metrics.service";
 import { StructuredLoggerService } from "../../infrastructure/observability/structured-logger.service";
+import {
+  WagerTransactionProcessed,
+  WalletBalanceChanged,
+} from "../events/integration-events";
 
 export interface CreateWalletInput {
   playerId: string;
@@ -33,8 +42,14 @@ export class WalletApplicationService {
 
       if (existing) {
         this.metrics.increment("wallet.duplicate");
-        this.logger.warn("wallet.create.duplicate", { correlationId, playerId: input.playerId, currency: money.currency });
-        throw new ConflictException("Wallet already exists for this player and currency");
+        this.logger.warn("wallet.create.duplicate", {
+          correlationId,
+          playerId: input.playerId,
+          currency: money.currency,
+        });
+        throw new ConflictException(
+          "Wallet already exists for this player and currency",
+        );
       }
 
       const wallet = tx.create(WalletEntity, {
@@ -85,23 +100,52 @@ export class WalletApplicationService {
           createdAt: new Date(),
         });
 
-        tx.create(OutboxMessageEntity, {
-          id: randomUUID(),
-          aggregateId: wallet.id,
-          eventType: "wallet.created",
-          payload: {
+        const context = {
+          correlationId: correlationId ?? `wallet:${wallet.id}`,
+          causationId: openingTx.id,
+        };
+        const balanceChanged = WalletBalanceChanged.from(
+          wallet.id,
+          {
+            walletId: wallet.id,
+            transactionId: openingTx.id,
+            direction: "CREDIT",
+            money: money.toJSON(),
+            balanceBefore: { amount: "0.00", currency: money.currency },
+            balanceAfter: money.toJSON(),
+            walletVersion: wallet.version,
+          },
+          context,
+        );
+        const transactionProcessed = WagerTransactionProcessed.from(
+          wallet.id,
+          {
+            transactionId: openingTx.id,
+            providerId: openingTx.providerId,
+            externalTransactionId: openingTx.externalTransactionId,
             walletId: wallet.id,
             playerId: wallet.playerId,
-            currency: wallet.currency,
-            balance: wallet.balance,
-            transactionId: openingTx.id,
-            version: wallet.version,
+            roundId: openingTx.roundId,
+            gameId: openingTx.gameId,
+            kind: openingTx.kind,
+            money: money.toJSON(),
+            status: openingTx.status,
           },
-          occurredAt: new Date(),
-          attempts: 0,
-          nextAttemptAt: new Date(),
-          publishedAt: null,
-        });
+          context,
+        );
+
+        for (const event of [balanceChanged, transactionProcessed]) {
+          tx.create(OutboxMessageEntity, {
+            id: event.eventId,
+            aggregateId: event.aggregateId,
+            eventType: event.eventType,
+            payload: event.toJSON(),
+            occurredAt: event.occurredAt,
+            attempts: 0,
+            nextAttemptAt: event.occurredAt,
+            publishedAt: null,
+          });
+        }
       }
 
       await tx.flush();
@@ -146,55 +190,130 @@ export class WalletApplicationService {
 
   async findLedger(walletId: string, cursor?: string, limit = 50) {
     const wallet = await this.findWalletEntityById(walletId);
+    const pageSize = Math.min(Math.max(limit, 1), 100);
+    const afterSeq = cursor ? this.decodeLedgerCursor(cursor) : undefined;
     const items = await this.em.find(
       WalletLedgerEntryEntity,
-      { walletId: wallet.id },
       {
-        limit: Math.min(Math.max(limit, 1), 100),
-        orderBy: { createdAt: "ASC" },
+        walletId: wallet.id,
+        ...(afterSeq ? { seq: { $gt: afterSeq } } : {}),
+      },
+      {
+        limit: pageSize,
+        orderBy: { seq: "ASC" },
       },
     );
 
+    const lastSeq = items.at(-1)?.seq;
     return {
       walletId: wallet.id,
       cursor: cursor ?? null,
+      nextCursor:
+        items.length === pageSize && lastSeq !== undefined && lastSeq !== null
+          ? this.encodeLedgerCursor(lastSeq)
+          : null,
       items: items.map((entry) => ({
+        seq: entry.seq,
         id: entry.id,
         transactionId: entry.transactionId,
         direction: entry.direction,
         amount: { amount: entry.amount, currency: entry.currency },
-        balanceBefore: { amount: entry.balanceBefore, currency: entry.currency },
+        balanceBefore: {
+          amount: entry.balanceBefore,
+          currency: entry.currency,
+        },
         balanceAfter: { amount: entry.balanceAfter, currency: entry.currency },
         createdAt: entry.createdAt,
       })),
     };
   }
 
+  private encodeLedgerCursor(seq: string | number | bigint): string {
+    return Buffer.from(String(seq), "utf8").toString("base64url");
+  }
+
+  private decodeLedgerCursor(cursor: string): string {
+    try {
+      const decoded = Buffer.from(cursor, "base64url").toString("utf8");
+      if (!/^[1-9]\d*$/.test(decoded)) {
+        throw new Error("invalid sequence");
+      }
+      return decoded;
+    } catch {
+      throw new BadRequestException("Invalid ledger cursor");
+    }
+  }
+
   async reconcileWallet(
     walletId: string,
-    storedBalance: MoneyProps,
-    calculatedBalance: MoneyProps,
+    _storedBalance?: MoneyProps,
+    _calculatedBalance?: MoneyProps,
   ) {
     const wallet = await this.findWalletEntityById(walletId);
-    const stored = Money.from(storedBalance);
-    const calculated = Money.from(calculatedBalance);
+    const stored = Money.from({
+      amount: wallet.balance,
+      currency: wallet.currency,
+    });
+    const entries = await this.em.find(
+      WalletLedgerEntryEntity,
+      { walletId: wallet.id },
+      { orderBy: { seq: "ASC" } },
+    );
+    let calculated = Money.zero(wallet.currency);
+    for (const entry of entries) {
+      const amount = Money.from({
+        amount: entry.amount,
+        currency: entry.currency,
+      });
+      calculated =
+        entry.direction === "CREDIT"
+          ? calculated.add(amount)
+          : calculated.subtract(amount);
+    }
+
     const difference = stored.subtract(calculated);
     const consistent = stored.equals(calculated);
+    if (!consistent) {
+      this.metrics.increment("wallet.reconciliation.mismatch");
+      this.logger.warn("wallet.reconciliation.mismatch", {
+        walletId: wallet.id,
+        checkedEntries: entries.length,
+      });
+    }
 
     return {
       walletId: wallet.id,
-      storedBalance: { amount: stored.toJSON().amount, currency: stored.currency },
-      calculatedBalance: { amount: calculated.toJSON().amount, currency: calculated.currency },
-      difference: { amount: difference.toJSON().amount, currency: difference.currency },
+      storedBalance: {
+        amount: stored.toJSON().amount,
+        currency: stored.currency,
+      },
+      calculatedBalance: {
+        amount: calculated.toJSON().amount,
+        currency: calculated.currency,
+      },
+      difference: {
+        amount: difference.toJSON().amount,
+        currency: difference.currency,
+      },
       consistent,
-      checkedEntries: await this.em.count(WalletLedgerEntryEntity, { walletId: wallet.id }),
+      checkedEntries: entries.length,
     };
   }
 
-  async updateBalanceFromLedger(wallet: WalletEntity, delta: string, direction: "DEBIT" | "CREDIT") {
-    const current = Money.from({ amount: wallet.balance, currency: wallet.currency });
+  async updateBalanceFromLedger(
+    wallet: WalletEntity,
+    delta: string,
+    direction: "DEBIT" | "CREDIT",
+  ) {
+    const current = Money.from({
+      amount: wallet.balance,
+      currency: wallet.currency,
+    });
     const deltaMoney = Money.from({ amount: delta, currency: wallet.currency });
-    const next = direction === "DEBIT" ? current.subtract(deltaMoney) : current.add(deltaMoney);
+    const next =
+      direction === "DEBIT"
+        ? current.subtract(deltaMoney)
+        : current.add(deltaMoney);
     wrap(wallet).assign({
       balance: next.toJSON().amount,
       version: wallet.version + 1,

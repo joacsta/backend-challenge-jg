@@ -16,11 +16,22 @@ export const WagerTransactionEntitySchema = defineEntity({
     kind: p.string(),
     amount: p.decimal().precision(18).scale(2),
     currency: p.string().length(3),
-    referenceExternalTransactionId: p.string().nullable().fieldName("reference_external_transaction_id"),
-    referenceTransactionId: p.uuid().nullable().fieldName("reference_transaction_id"),
+    referenceExternalTransactionId: p
+      .string()
+      .nullable()
+      .fieldName("reference_external_transaction_id"),
+    referenceTransactionId: p
+      .uuid()
+      .nullable()
+      .fieldName("reference_transaction_id"),
     status: p.string(),
     failureCode: p.string().nullable().fieldName("failure_code"),
-    observedBalance: p.decimal().precision(18).scale(2).nullable().fieldName("observed_balance"),
+    observedBalance: p
+      .decimal()
+      .precision(18)
+      .scale(2)
+      .nullable()
+      .fieldName("observed_balance"),
     attempts: p.integer().default(0),
     nextAttemptAt: p.datetime().nullable().fieldName("next_attempt_at"),
     createdAt: p.datetime().fieldName("created_at").defaultRaw("now()"),
@@ -28,5 +39,6 @@ export const WagerTransactionEntitySchema = defineEntity({
   },
 });
 
-export class WagerTransactionEntity extends WagerTransactionEntitySchema.class {}
+export class WagerTransactionEntity
+  extends WagerTransactionEntitySchema.class {}
 WagerTransactionEntitySchema.setClass(WagerTransactionEntity);

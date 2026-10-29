@@ -1,5 +1,9 @@
 import { EntityManager, LockMode } from "@mikro-orm/core";
-import { ConflictException, Injectable, NotFoundException } from "@nestjs/common";
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
 import { createHash } from "node:crypto";
 import { randomUUID } from "node:crypto";
 import { Money } from "../../domain/money/money";
@@ -9,6 +13,15 @@ import { WalletLedgerEntryEntity } from "../../infrastructure/persistence/entiti
 import { OutboxMessageEntity } from "../../infrastructure/persistence/entities/outbox-message.entity";
 import { MetricsService } from "../../infrastructure/observability/metrics.service";
 import { StructuredLoggerService } from "../../infrastructure/observability/structured-logger.service";
+import {
+  IntegrationEvent,
+  WagerTransactionPendingReference,
+  WagerTransactionProcessed,
+  WagerTransactionRejected,
+  WalletBalanceChanged,
+  type EventContext,
+  type LedgerDirection,
+} from "../events/integration-events";
 
 export interface SubmitWagerInput {
   providerId: string;
@@ -20,6 +33,7 @@ export interface SubmitWagerInput {
   kind: "BET" | "WIN" | "LOSS" | "REFUND" | "ROLLBACK";
   money: { amount: string; currency: string };
   referenceExternalTransactionId?: string;
+  correlationId?: string;
 }
 
 @Injectable()
@@ -31,7 +45,9 @@ export class WageringApplicationService {
   ) {}
 
   async findTransactionById(transactionId: string) {
-    const transaction = await this.em.findOne(WagerTransactionEntity, { id: transactionId });
+    const transaction = await this.em.findOne(WagerTransactionEntity, {
+      id: transactionId,
+    });
     if (!transaction) {
       throw new NotFoundException("Transaction not found");
     }
@@ -48,28 +64,43 @@ export class WageringApplicationService {
       amount: { amount: transaction.amount, currency: transaction.currency },
       status: transaction.status,
       failureCode: transaction.failureCode,
-      observedBalance: transaction.observedBalance ? { amount: transaction.observedBalance, currency: transaction.currency } : null,
+      observedBalance: transaction.observedBalance
+        ? {
+            amount: transaction.observedBalance,
+            currency: transaction.currency,
+          }
+        : null,
       createdAt: transaction.createdAt,
       processedAt: transaction.processedAt,
     };
   }
 
-  async findTransactionByProviderReference(providerId: string, externalTransactionId: string) {
+  async findTransactionByProviderReference(
+    providerId: string,
+    externalTransactionId: string,
+  ) {
     const transaction = await this.em.findOne(WagerTransactionEntity, {
       providerId,
       externalTransactionId,
     });
 
     if (!transaction) {
-      throw new NotFoundException("Transaction not found for provider reference");
+      throw new NotFoundException(
+        "Transaction not found for provider reference",
+      );
     }
 
     return this.findTransactionById(transaction.id);
   }
 
-  async submitWager(input: SubmitWagerInput, idempotencyKeyHeader?: string) {
+  async submitWager(
+    input: SubmitWagerInput,
+    idempotencyKeyHeader?: string,
+    transactionManager?: EntityManager,
+  ) {
     const idempotencyKey =
-      idempotencyKeyHeader ?? `${input.providerId}:${input.externalTransactionId}`;
+      idempotencyKeyHeader ??
+      `${input.providerId}:${input.externalTransactionId}`;
 
     const payloadHash = this.makePayloadHash({
       providerId: input.providerId,
@@ -92,22 +123,42 @@ export class WageringApplicationService {
       externalTransactionId: input.externalTransactionId,
     });
 
+    if (
+      existingByExternalId &&
+      existingByExternalId.idempotencyKey !== idempotencyKey
+    ) {
+      throw new ConflictException(
+        "External transaction already exists with a different idempotency key",
+      );
+    }
+
     const resolvedExisting = existingByKey ?? existingByExternalId;
 
     if (resolvedExisting) {
       if (resolvedExisting.payloadHash !== payloadHash) {
         this.metrics.increment("idempotency.payload_conflict");
-        this.logger.warn("idempotency.payload_conflict", { idempotencyKey, providerId: input.providerId, externalTransactionId: input.externalTransactionId });
-        throw new ConflictException("Idempotency key already used with different payload");
+        this.logger.warn("idempotency.payload_conflict", {
+          idempotencyKey,
+          providerId: input.providerId,
+          externalTransactionId: input.externalTransactionId,
+        });
+        throw new ConflictException(
+          "Idempotency key already used with different payload",
+        );
       }
 
-      this.metrics.increment("idempotency.replay");
-      return {
-        transactionId: resolvedExisting.id,
-        status: resolvedExisting.status,
-        balance: { amount: resolvedExisting.observedBalance ?? "0.00", currency: resolvedExisting.currency },
-        idempotentReplay: true,
-      };
+      if (resolvedExisting.status !== "PENDING_REFERENCE") {
+        this.metrics.increment("idempotency.replay");
+        return {
+          transactionId: resolvedExisting.id,
+          status: resolvedExisting.status,
+          balance: {
+            amount: resolvedExisting.observedBalance ?? "0.00",
+            currency: resolvedExisting.currency,
+          },
+          idempotentReplay: true,
+        };
+      }
     }
 
     let result: {
@@ -117,7 +168,7 @@ export class WageringApplicationService {
       idempotentReplay: boolean;
     };
 
-    await this.em.transactional(async (tx: EntityManager) => {
+    const process = async (tx: EntityManager) => {
       const wallet = await tx.findOne(
         WalletEntity,
         { id: input.walletId },
@@ -127,7 +178,9 @@ export class WageringApplicationService {
         throw new NotFoundException("Wallet not found");
       }
 
-      const currentByKey = await tx.findOne(WagerTransactionEntity, { idempotencyKey });
+      const currentByKey = await tx.findOne(WagerTransactionEntity, {
+        idempotencyKey,
+      });
       const currentByExternalId = await tx.findOne(WagerTransactionEntity, {
         providerId: input.providerId,
         externalTransactionId: input.externalTransactionId,
@@ -137,44 +190,167 @@ export class WageringApplicationService {
       if (current) {
         if (current.payloadHash !== payloadHash) {
           this.metrics.increment("idempotency.payload_conflict");
-          this.logger.warn("idempotency.payload_conflict", { idempotencyKey, providerId: input.providerId, externalTransactionId: input.externalTransactionId });
-          throw new ConflictException("Idempotency key already used with different payload");
+          this.logger.warn("idempotency.payload_conflict", {
+            idempotencyKey,
+            providerId: input.providerId,
+            externalTransactionId: input.externalTransactionId,
+          });
+          throw new ConflictException(
+            "Idempotency key already used with different payload",
+          );
         }
 
-        this.metrics.increment("idempotency.replay");
-        result = {
-          transactionId: current.id,
-          status: current.status,
-          balance: { amount: current.observedBalance ?? "0.00", currency: current.currency },
-          idempotentReplay: true,
-        };
-        return;
+        if (current.status !== "PENDING_REFERENCE") {
+          this.metrics.increment("idempotency.replay");
+          result = {
+            transactionId: current.id,
+            status: current.status,
+            balance: {
+              amount: current.observedBalance ?? "0.00",
+              currency: current.currency,
+            },
+            idempotentReplay: true,
+          };
+          return;
+        }
       }
 
       const amount = Money.from(input.money);
-      const oneTx = tx.create(WagerTransactionEntity, {
-        id: randomUUID(),
-        providerId: input.providerId,
-        externalTransactionId: input.externalTransactionId,
-        idempotencyKey,
-        payloadHash,
-        walletId: wallet.id,
-        playerId: wallet.playerId,
-        roundId: input.roundId,
-        gameId: input.gameId,
-        kind: input.kind,
-        amount: amount.toJSON().amount,
-        currency: amount.currency,
-        referenceExternalTransactionId: input.referenceExternalTransactionId,
-        status: "PENDING",
-        createdAt: new Date(),
-      });
+      const oneTx =
+        current ??
+        tx.create(WagerTransactionEntity, {
+          id: randomUUID(),
+          providerId: input.providerId,
+          externalTransactionId: input.externalTransactionId,
+          idempotencyKey,
+          payloadHash,
+          walletId: wallet.id,
+          playerId: wallet.playerId,
+          roundId: input.roundId,
+          gameId: input.gameId,
+          kind: input.kind,
+          amount: amount.toJSON().amount,
+          currency: amount.currency,
+          referenceExternalTransactionId: input.referenceExternalTransactionId,
+          status: "PENDING",
+          createdAt: new Date(),
+        });
 
-      if (input.kind === "BET") {
-        const available = Money.from({ amount: wallet.balance, currency: wallet.currency });
-        if (available.isLessThan(amount)) {
+      if (input.kind === "REFUND" || input.kind === "ROLLBACK") {
+        const reference = await tx.findOne(
+          WagerTransactionEntity,
+          {
+            providerId: input.providerId,
+            externalTransactionId: input.referenceExternalTransactionId,
+          },
+          { lockMode: LockMode.PESSIMISTIC_WRITE },
+        );
+
+        if (!reference) {
+          const attempts = (oneTx.attempts ?? 0) + 1;
+          oneTx.attempts = attempts;
+          if (attempts >= this.maxReferenceAttempts()) {
+            oneTx.status = "REJECTED";
+            oneTx.failureCode = "REFERENCE_NOT_FOUND";
+            oneTx.processedAt = new Date();
+            this.enqueueTransactionEvent(
+              tx,
+              WagerTransactionRejected.from(
+                wallet.id,
+                this.transactionEventData(oneTx),
+                this.eventContext(input),
+              ),
+            );
+          } else {
+            oneTx.status = "PENDING_REFERENCE";
+            oneTx.nextAttemptAt = this.nextReferenceAttempt(new Date(), attempts);
+            this.enqueueTransactionEvent(
+              tx,
+              WagerTransactionPendingReference.from(
+                wallet.id,
+                this.transactionEventData(oneTx),
+                this.eventContext(input),
+              ),
+            );
+          }
+          await tx.flush();
+          result = {
+            transactionId: oneTx.id,
+            status: oneTx.status,
+            balance: { amount: wallet.balance, currency: wallet.currency },
+            idempotentReplay: false,
+          };
+          return;
+        }
+
+        const referenceFailure = this.validateReference(input, amount, wallet, reference);
+        if (referenceFailure) {
           oneTx.status = "REJECTED";
-          oneTx.failureCode = "INSUFFICIENT_FUNDS";
+          oneTx.failureCode = referenceFailure;
+          oneTx.processedAt = new Date();
+          oneTx.observedBalance = wallet.balance;
+          this.metrics.increment("wager.transaction.rejected");
+          this.enqueueTransactionEvent(
+            tx,
+            WagerTransactionRejected.from(
+              wallet.id,
+              this.transactionEventData(oneTx),
+              this.eventContext(input),
+            ),
+          );
+          await tx.flush();
+          result = {
+            transactionId: oneTx.id,
+            status: oneTx.status,
+            balance: { amount: wallet.balance, currency: wallet.currency },
+            idempotentReplay: false,
+          };
+          return;
+        }
+
+        const alreadyReversed = await tx.findOne(WagerTransactionEntity, {
+          referenceTransactionId: reference.id,
+          kind: input.kind,
+          status: "PROCESSED",
+        });
+        if (alreadyReversed) {
+          oneTx.status = "REJECTED";
+          oneTx.failureCode = "ALREADY_REVERSED";
+          oneTx.processedAt = new Date();
+          oneTx.observedBalance = wallet.balance;
+          this.metrics.increment("wager.transaction.rejected");
+          this.enqueueTransactionEvent(
+            tx,
+            WagerTransactionRejected.from(
+              wallet.id,
+              this.transactionEventData(oneTx),
+              this.eventContext(input),
+            ),
+          );
+          await tx.flush();
+          result = {
+            transactionId: oneTx.id,
+            status: oneTx.status,
+            balance: { amount: wallet.balance, currency: wallet.currency },
+            idempotentReplay: false,
+          };
+          return;
+        }
+
+        const direction = input.kind === "REFUND"
+          ? "CREDIT"
+          : this.rollbackDirection(reference.kind);
+        const before = Money.from({
+          amount: wallet.balance,
+          currency: wallet.currency,
+        });
+        const next = direction === "CREDIT"
+          ? before.add(amount)
+          : before.subtract(amount);
+
+        if (next.isNegative()) {
+          oneTx.status = "REJECTED";
+          oneTx.failureCode = "REVERSAL_INSUFFICIENT_FUNDS";
           oneTx.processedAt = new Date();
           oneTx.observedBalance = wallet.balance;
           this.metrics.increment("wager.transaction.rejected");
@@ -188,7 +364,71 @@ export class WageringApplicationService {
           return;
         }
 
-        const before = Money.from({ amount: wallet.balance, currency: wallet.currency });
+        wallet.balance = next.toJSON().amount;
+        wallet.version += 1;
+        wallet.updatedAt = new Date();
+        oneTx.referenceTransactionId = reference.id;
+        oneTx.status = "PROCESSED";
+        oneTx.processedAt = new Date();
+        oneTx.observedBalance = wallet.balance;
+
+        await tx.flush();
+        tx.create(WalletLedgerEntryEntity, {
+          id: randomUUID(),
+          walletId: wallet.id,
+          transactionId: oneTx.id,
+          direction,
+          amount: amount.toJSON().amount,
+          currency: amount.currency,
+          balanceBefore: before.toJSON().amount,
+          balanceAfter: next.toJSON().amount,
+          createdAt: new Date(),
+        });
+        this.createBalanceChangedOutbox(
+          tx,
+          wallet,
+          oneTx,
+          direction,
+          amount,
+          before,
+          next,
+          this.eventContext(input),
+        );
+      }
+
+      if (input.kind === "BET") {
+        const available = Money.from({
+          amount: wallet.balance,
+          currency: wallet.currency,
+        });
+        if (available.isLessThan(amount)) {
+          oneTx.status = "REJECTED";
+          oneTx.failureCode = "INSUFFICIENT_FUNDS";
+          oneTx.processedAt = new Date();
+          oneTx.observedBalance = wallet.balance;
+          this.metrics.increment("wager.transaction.rejected");
+          this.enqueueTransactionEvent(
+            tx,
+            WagerTransactionRejected.from(
+              wallet.id,
+              this.transactionEventData(oneTx),
+              this.eventContext(input),
+            ),
+          );
+          await tx.flush();
+          result = {
+            transactionId: oneTx.id,
+            status: oneTx.status,
+            balance: { amount: wallet.balance, currency: wallet.currency },
+            idempotentReplay: false,
+          };
+          return;
+        }
+
+        const before = Money.from({
+          amount: wallet.balance,
+          currency: wallet.currency,
+        });
         const next = before.subtract(amount);
         wallet.balance = next.toJSON().amount;
         wallet.version += 1;
@@ -211,30 +451,23 @@ export class WageringApplicationService {
           createdAt: new Date(),
         });
 
-        tx.create(OutboxMessageEntity, {
-          id: randomUUID(),
-          aggregateId: wallet.id,
-          eventType: "wallet.balance.changed",
-          payload: {
-            walletId: wallet.id,
-            playerId: wallet.playerId,
-            currency: wallet.currency,
-            walletVersion: wallet.version,
-            transactionId: oneTx.id,
-            direction: "DEBIT",
-            amount: amount.toJSON().amount,
-            balanceBefore: before.toJSON().amount,
-            balanceAfter: next.toJSON().amount,
-          },
-          occurredAt: new Date(),
-          attempts: 0,
-          nextAttemptAt: new Date(),
-          publishedAt: null,
-        });
+        this.createBalanceChangedOutbox(
+          tx,
+          wallet,
+          oneTx,
+          "DEBIT",
+          amount,
+          before,
+          next,
+          this.eventContext(input),
+        );
       }
 
       if (input.kind === "WIN") {
-        const before = Money.from({ amount: wallet.balance, currency: wallet.currency });
+        const before = Money.from({
+          amount: wallet.balance,
+          currency: wallet.currency,
+        });
         const next = before.add(amount);
         wallet.balance = next.toJSON().amount;
         wallet.version += 1;
@@ -257,26 +490,16 @@ export class WageringApplicationService {
           createdAt: new Date(),
         });
 
-        tx.create(OutboxMessageEntity, {
-          id: randomUUID(),
-          aggregateId: wallet.id,
-          eventType: "wallet.balance.changed",
-          payload: {
-            walletId: wallet.id,
-            playerId: wallet.playerId,
-            currency: wallet.currency,
-            walletVersion: wallet.version,
-            transactionId: oneTx.id,
-            direction: "CREDIT",
-            amount: amount.toJSON().amount,
-            balanceBefore: before.toJSON().amount,
-            balanceAfter: next.toJSON().amount,
-          },
-          occurredAt: new Date(),
-          attempts: 0,
-          nextAttemptAt: new Date(),
-          publishedAt: null,
-        });
+        this.createBalanceChangedOutbox(
+          tx,
+          wallet,
+          oneTx,
+          "CREDIT",
+          amount,
+          before,
+          next,
+          this.eventContext(input),
+        );
       }
 
       if (input.kind === "LOSS") {
@@ -286,6 +509,14 @@ export class WageringApplicationService {
       }
 
       this.metrics.increment("wager.transaction.processed");
+      this.enqueueTransactionEvent(
+        tx,
+        WagerTransactionProcessed.from(
+          wallet.id,
+          this.transactionEventData(oneTx),
+          this.eventContext(input),
+        ),
+      );
       this.logger.log("wager.transaction.processed", {
         transactionId: oneTx.id,
         walletId: wallet.id,
@@ -301,13 +532,184 @@ export class WageringApplicationService {
         balance: { amount: wallet.balance, currency: wallet.currency },
         idempotentReplay: false,
       };
-    });
+    };
+
+    if (transactionManager) {
+      await process(transactionManager);
+    } else {
+      await this.em.transactional(process);
+    }
 
     return result!;
   }
 
+  async processPendingReferences(limit = 25): Promise<number> {
+    const now = new Date();
+    const pending = await this.em.find(
+      WagerTransactionEntity,
+      { status: "PENDING_REFERENCE" },
+      { limit, orderBy: { createdAt: "ASC" } },
+    );
+    const due = pending.filter(
+      (transaction) =>
+        !transaction.nextAttemptAt || transaction.nextAttemptAt <= now,
+    );
+
+    for (const transaction of due) {
+      await this.submitWager(
+        {
+          providerId: transaction.providerId,
+          externalTransactionId: transaction.externalTransactionId,
+          playerId: transaction.playerId,
+          walletId: transaction.walletId,
+          roundId: transaction.roundId,
+          gameId: transaction.gameId,
+          kind: transaction.kind as SubmitWagerInput["kind"],
+          money: {
+            amount: transaction.amount,
+            currency: transaction.currency,
+          },
+          referenceExternalTransactionId:
+            transaction.referenceExternalTransactionId ?? undefined,
+          correlationId: transaction.idempotencyKey,
+        },
+        transaction.idempotencyKey,
+      );
+    }
+
+    return due.length;
+  }
+
   makePayloadHash(payload: Record<string, unknown>): string {
-    return createHash("sha256").update(this.stableStringify(payload)).digest("hex");
+    return createHash("sha256")
+      .update(this.stableStringify(payload))
+      .digest("hex");
+  }
+
+  private validateReference(
+    input: SubmitWagerInput,
+    amount: Money,
+    wallet: WalletEntity,
+    reference: WagerTransactionEntity,
+  ): "INVALID_REFERENCE" | "REFERENCE_MISMATCH" | "INVALID_REFERENCE_KIND" | "REFERENCE_AMOUNT_MISMATCH" | undefined {
+    if (
+      reference.status !== "PROCESSED" ||
+      reference.providerId !== input.providerId ||
+      reference.playerId !== wallet.playerId ||
+      reference.walletId !== wallet.id ||
+      reference.roundId !== input.roundId ||
+      reference.currency !== wallet.currency
+    ) {
+      return "REFERENCE_MISMATCH";
+    }
+
+    if (
+      (input.kind === "REFUND" && reference.kind !== "BET") ||
+      (input.kind === "ROLLBACK" &&
+        !["BET", "WIN", "REFUND"].includes(reference.kind))
+    ) {
+      return "INVALID_REFERENCE_KIND";
+    }
+
+    if (
+      Money.from({ amount: reference.amount, currency: reference.currency }).toJSON().amount !==
+      amount.toJSON().amount
+    ) {
+      return "REFERENCE_AMOUNT_MISMATCH";
+    }
+
+    return undefined;
+  }
+
+  private rollbackDirection(referenceKind: string): "DEBIT" | "CREDIT" {
+    return referenceKind === "BET" || referenceKind === "REFUND"
+      ? "CREDIT"
+      : "DEBIT";
+  }
+
+  private nextReferenceAttempt(now: Date, attempts: number): Date {
+    const delay = Math.min(30_000 * 2 ** attempts, 300_000);
+    return new Date(now.getTime() + delay);
+  }
+
+  private maxReferenceAttempts(): number {
+    return Number(process.env.WAGER_REFERENCE_MAX_ATTEMPTS ?? "5");
+  }
+
+  private createBalanceChangedOutbox(
+    tx: EntityManager,
+    wallet: WalletEntity,
+    transaction: WagerTransactionEntity,
+    direction: "DEBIT" | "CREDIT",
+    amount: Money,
+    before: Money,
+    after: Money,
+    context: EventContext,
+  ) {
+    this.enqueueTransactionEvent(
+      tx,
+      WalletBalanceChanged.from(
+        wallet.id,
+        {
+          walletId: wallet.id,
+          transactionId: transaction.id,
+          direction,
+          money: amount.toJSON(),
+          balanceBefore: before.toJSON(),
+          balanceAfter: after.toJSON(),
+          walletVersion: wallet.version,
+        },
+        context,
+      ),
+    );
+  }
+
+  private enqueueTransactionEvent(
+    tx: EntityManager,
+    event: IntegrationEvent<unknown>,
+  ) {
+    tx.create(OutboxMessageEntity, {
+      id: event.eventId,
+      aggregateId: event.aggregateId,
+      eventType: event.eventType,
+      payload: event.toJSON(),
+      occurredAt: event.occurredAt,
+      attempts: 0,
+      nextAttemptAt: event.occurredAt,
+      publishedAt: null,
+    });
+  }
+
+  private eventContext(input: SubmitWagerInput): EventContext {
+    return {
+      correlationId:
+        input.correlationId ??
+        `${input.providerId}:${input.externalTransactionId}`,
+      causationId: input.externalTransactionId,
+    };
+  }
+
+  private transactionEventData(
+    transaction: WagerTransactionEntity,
+  ) {
+    return {
+      transactionId: transaction.id,
+      providerId: transaction.providerId,
+      externalTransactionId: transaction.externalTransactionId,
+      walletId: transaction.walletId,
+      playerId: transaction.playerId,
+      roundId: transaction.roundId,
+      gameId: transaction.gameId,
+      kind: transaction.kind,
+      money: {
+        amount: transaction.amount,
+        currency: transaction.currency,
+      },
+      status: transaction.status,
+      ...(transaction.failureCode
+        ? { failureCode: transaction.failureCode }
+        : {}),
+    };
   }
 
   private stableStringify(value: unknown): string {
@@ -326,7 +728,10 @@ export class WageringApplicationService {
     if (typeof value === "object") {
       const entries = Object.entries(value as Record<string, unknown>)
         .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, nested]) => `${JSON.stringify(key)}:${this.stableStringify(nested)}`);
+        .map(
+          ([key, nested]) =>
+            `${JSON.stringify(key)}:${this.stableStringify(nested)}`,
+        );
       return `{${entries.join(",")}}`;
     }
 

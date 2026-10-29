@@ -1,404 +1,473 @@
-# Documentação de demonstração do projeto
+# Demo do Distributed Wagering Processor
 
-## Introdução
+Processador de apostas com foco em dinheiro: saldo por carteira, extrato imutável (ledger), idempotência, concorrência segura e eventos assíncronos (outbox/inbox + SQS).
 
-Este projeto simula um processador de apostas distribuído, com foco em dinheiro real, contas de usuário e eventos assíncronos.
+Este roteiro é **copiar e colar**. Os ids são capturados automaticamente em variáveis, então não há nada para editar à mão.
 
-Em termos simples:
-- ele cuida do saldo da carteira
-- registra tudo que entra e sai
-- evita que a mesma aposta seja processada duas vezes
-- evita erros por concorrência, quando duas pessoas tentam mexer no mesmo saldo ao mesmo tempo
-- envia eventos para fila para processamento assíncrono
+## Glossário rápido
 
-Importante:
-- o projeto não usa float para dinheiro
-- usa decimal/strings para evitar erro de cálculo
-- o saldo e os registros contábeis são protegidos no banco de dados
-
-## Termos técnicos explicados em linguagem simples
-
-- Money: valor monetário, como "25.00 BRL"
-- Ledger: registro contábil, tipo "histórico de movimentação da carteira"
-- Idempotência: "se a mesma operação chegar duas vezes, o sistema trata como a mesma coisa"
-- Outbox: "lista de eventos que precisam ser enviados depois da transação"
-- Inbox: "lista de mensagens recebidas para evitar reprocessamento"
-- SQS: fila de mensagens, como uma fila de trabalho
-- PostgreSQL: banco de dados relacional
-- LocalStack: ferramenta que simula serviços AWS locais
-- Lock: trava temporária para evitar conflito ao mexer no mesmo saldo ao mesmo tempo
-
-## Objetivo da demo
-
-Verificar que:
-- uma carteira pode ser criada
-- uma aposta pode ser processada
-- a mesma aposta não duplica efeito
-- o mesmo payload com a mesma chave não pode ser aceito se for diferente
-- o saldo final permanece consistente
-- eventos saem para fila e podem ser processados depois
+| Termo        | Significado                                                                |
+| ------------ | -------------------------------------------------------------------------- |
+| Money        | valor como texto decimal, ex.: `"25.00"` + moeda `BRL` (nunca float)       |
+| Ledger       | extrato imutável: uma linha por mudança de saldo, com saldo antes e depois |
+| Idempotência | repetir o mesmo pedido não repete o efeito                                 |
+| Outbox       | eventos gravados na mesma transação do dinheiro, publicados depois         |
+| Inbox        | mensagens da fila já tratadas, para não processar duas vezes               |
+| Lock         | trava na carteira para duas apostas não mexerem no mesmo saldo juntas      |
 
 ## Pré-requisitos
 
-- Docker
-- Docker Compose
-- Bun
-- Git
+Docker, Docker Compose, Bun, Git. Use **dois terminais** na raiz do projeto:
 
-## Estrutura do projeto
+- **Terminal 1**: o app (fica rodando e mostra os logs).
+- **Terminal 2**: todos os `curl` e consultas. As variáveis ficam salvas nele, então não feche entre os passos.
 
-A parte principal está em:
-- src/application: regras de negócio
-- src/domain: regras centrais do domínio
-- src/infrastructure: banco, filas, infraestrutura
-- migrations: criação das tabelas no banco
-- docker-compose.yml: sobe PostgreSQL e LocalStack
+---
 
-## Passo 1: subir infraestrutura
-
-Na raiz do projeto, rode:
+## Passo 1: infraestrutura (terminal 2)
 
 ```bash
 docker compose up -d
-```
-
-Esse comando sobe:
-- PostgreSQL
-- LocalStack
-
-Esses serviços são usados para simular o ambiente real do projeto.
-
-## Passo 2: verificar se os serviços subiram
-
-Você pode testar com:
-
-```bash
 docker compose ps
 ```
 
-Também pode testar o banco com:
-- Postgres em localhost:5432
-- LocalStack em localhost:4566
+Esperado: `postgres` e `localstack` com status `Up` (healthy).
 
-## Passo 3: instalar dependências do projeto
+Testes de vida dos serviços:
 
-Se ainda não estiverem instaladas:
+```bash
+docker compose exec postgres psql -U wagering -d wagering -c "select 1 as ok;"
+curl -s http://localhost:4566/_localstack/health | head -c 300; echo
+```
+
+## Passo 2: dependências e migrations (terminal 2)
 
 ```bash
 bun install
+bun run scripts/migrate.ts
 ```
 
-## Passo 4: iniciar a aplicação
+Esperado: `pendentes antes:` e `executadas agora:` listando as migrations (se vierem `[]` em banco novo, as migrations não foram encontradas: confira `migrations/index.ts`).
 
-No terminal da raiz:
+Confirme as tabelas:
+
+```bash
+docker compose exec postgres psql -U wagering -d wagering -c "\dt"
+```
+
+Esperado: `wallets`, `wager_transactions`, `wallet_ledger_entries`, `inbox_messages`, `outbox_messages`, `mikro_orm_migrations`.
+
+## Passo 3: subir a aplicação (terminal 1)
 
 ```bash
 bun run src/main.ts
 ```
 
-Se tudo estiver ok, a API ficará disponível em:
-- http://localhost:3000
+Esperado no log: `Nest application successfully started`, sem `ERROR`. A API fica em `http://localhost:3000`.
 
-## Passo 5: verificar saúde da aplicação
+## Passo 4: preparar o terminal 2
 
-Teste:
-
-```bash
-curl http://localhost:3000/health/ready
-```
-
-Resposta esperada:
-- status ok
-- postgres true
-- sqs true
-
-Isso quer dizer que:
-- o banco está acessível
-- a fila está acessível
-
-## Passo 6: criar uma carteira
-
-Endpoint:
-
-```http
-POST /wallets
-```
-
-Exemplo de body:
-
-```json
-{
-  "playerId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-  "initialBalance": {
-    "amount": "1000.00",
-    "currency": "BRL"
-  }
-}
-```
-
-Comando curl:
+Abra um bash (garante a mesma sintaxe para todos os comandos) e defina as variáveis e um formatador de JSON:
 
 ```bash
-curl -X POST http://localhost:3000/wallets \
+bash
+```
+
+```bash
+export API=http://localhost:3000
+export RUN=$(date +%s)
+export PLAYER_ID=$(cat /proc/sys/kernel/random/uuid)
+pj() { python3 -m json.tool; }
+psqlc() { docker compose exec -T postgres psql -U wagering -d wagering -c "$1"; }
+echo "RUN=$RUN PLAYER_ID=$PLAYER_ID"
+```
+
+`psqlc "..."` é um atalho para rodar SQL no banco. Cada execução usa `RUN` e `PLAYER_ID` novos, então pode repetir a demo quantas vezes quiser.
+
+## Passo 5: saúde da aplicação
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" $API/health/live
+curl -s -w "\nHTTP %{http_code}\n" $API/health/ready
+```
+
+Esperado: `HTTP 200`; no `ready`, `postgres` e `sqs` verdadeiros.
+
+## Passo 6: criar uma carteira (saldo inicial 1000.00)
+
+```bash
+WALLET_JSON=$(curl -s -X POST $API/wallets \
   -H "Content-Type: application/json" \
-  -d '{"playerId":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","initialBalance":{"amount":"1000.00","currency":"BRL"}}'
+  -d "{\"playerId\":\"$PLAYER_ID\",\"initialBalance\":{\"amount\":\"1000.00\",\"currency\":\"BRL\"}}")
+echo "$WALLET_JSON" | pj
+export WALLET_ID=$(echo "$WALLET_JSON" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "WALLET_ID=$WALLET_ID"
 ```
 
-Resposta esperada:
-- id da carteira
-- playerId
-- balance: 1000.00 BRL
-- version: 1
+Esperado: `balance 1000.00 BRL` e `version 1`. Se `WALLET_ID` sair vazio, a criação falhou: leia o JSON impresso acima.
 
-O que isso significa:
-- a carteira foi criada
-- o saldo inicial foi registrado
-- a versão inicial da carteira começa em 1
-
-## Passo 7: criar uma aposta
-
-Endpoint:
-
-```http
-POST /wagering/transactions
-```
-
-Importante:
-- O header Idempotency-Key é obrigatório
-- Ele serve para identificar que a operação é a mesma
-- Isso evita que a mesma aposta seja duplicada
-
-Exemplo de header:
-
-```http
-Idempotency-Key: provider-a:transaction-live-2
-```
-
-Exemplo de body:
-
-```json
-{
-  "providerId": "provider-a",
-  "externalTransactionId": "transaction-live-2",
-  "playerId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-  "walletId": "SUA_WALLET_ID_AQUI",
-  "roundId": "round-live",
-  "gameId": "fortune-chimp",
-  "kind": "BET",
-  "money": {
-    "amount": "25.00",
-    "currency": "BRL"
-  }
-}
-```
-
-Comando curl:
+Consulte a carteira:
 
 ```bash
-curl -X POST http://localhost:3000/wagering/transactions \
+curl -s $API/wallets/$WALLET_ID | pj
+```
+
+Criar de novo a carteira do mesmo jogador na mesma moeda deve dar conflito:
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X POST $API/wallets \
   -H "Content-Type: application/json" \
-  -H "Idempotency-Key: provider-a:transaction-live-2" \
-  -d '{
-    "providerId":"provider-a",
-    "externalTransactionId":"transaction-live-2",
-    "playerId":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-    "walletId":"SUA_WALLET_ID_AQUI",
-    "roundId":"round-live",
-    "gameId":"fortune-chimp",
-    "kind":"BET",
-    "money":{"amount":"25.00","currency":"BRL"}
-  }'
+  -d "{\"playerId\":\"$PLAYER_ID\",\"initialBalance\":{\"amount\":\"1.00\",\"currency\":\"BRL\"}}"
 ```
 
-Resposta esperada:
-- transactionId
-- status: PROCESSED
-- balance: 975.00 BRL
-- idempotentReplay: false
+Esperado: `HTTP 409`.
 
-Isso quer dizer:
-- a aposta foi aceita
-- 25.00 foram debitados da carteira
-- o saldo agora é 975.00
-
-## Passo 8: testar replay idempotente
-
-Faça a mesma requisição exatamente igual, com o mesmo Idempotency-Key.
-
-Resposta esperada:
-- o mesmo transactionId
-- status: PROCESSED
-- balance: 975.00 BRL
-- idempotentReplay: true
-
-Isso quer dizer:
-- a operação foi reconhecida como repetição da mesma ação
-- o sistema não executou de novo o débito
-
-## Passo 9: testar conflito de payload
-
-Use a mesma Idempotency-Key, mas mude o valor do dinheiro.
-
-Exemplo:
-- primeiro request: 25.00
-- segundo request: 30.00
-
-Mesmo Idempotency-Key, payload diferente.
-
-Resposta esperada:
-- HTTP 409 Conflict
-- mensagem: Idempotency key already used with different payload
-
-Isso é importante porque garante que:
-- não pode reutilizar a mesma chave para outra operação sem autorização
-- isso evita inconsistência
-
-## Passo 10: verificar o histórico da carteira
-
-Endpoint:
-
-```http
-GET /wallets/:walletId/ledger
-```
-
-Comando:
+## Passo 7: criar uma aposta (BET de 25.00)
 
 ```bash
-curl http://localhost:3000/wallets/SUA_WALLET_ID_AQUI/ledger
+export TX_ID="transaction-$RUN"
+export TX_KEY="provider-a:$TX_ID"
+export BET_BODY="{\"providerId\":\"provider-a\",\"externalTransactionId\":\"$TX_ID\",\"playerId\":\"$PLAYER_ID\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"round-$RUN\",\"gameId\":\"fortune-chimp\",\"kind\":\"BET\",\"money\":{\"amount\":\"25.00\",\"currency\":\"BRL\"}}"
 ```
-
-Resposta esperada:
-- histórico de entradas e saídas
-- cada linha com:
-  - tipo de movimentação
-  - valor
-  - saldo antes
-  - saldo depois
-  - data
-
-Isso mostra que tudo foi registrado de forma auditável.
-
-## Passo 11: verificar reconciliação
-
-Endpoint:
-
-```http
-POST /wallets/:walletId/reconciliation
-```
-
-Exemplo:
-
-```json
-{
-  "storedBalance": { "amount": "975.00", "currency": "BRL" },
-  "calculatedBalance": { "amount": "975.00", "currency": "BRL" }
-}
-```
-
-Comando:
 
 ```bash
-curl -X POST http://localhost:3000/wallets/SUA_WALLET_ID_AQUI/reconciliation \
+curl -s -w "\nHTTP %{http_code}\n" -X POST $API/wagering/transactions \
   -H "Content-Type: application/json" \
-  -d '{"storedBalance":{"amount":"975.00","currency":"BRL"},"calculatedBalance":{"amount":"975.00","currency":"BRL"}}'
+  -H "Idempotency-Key: $TX_KEY" \
+  -d "$BET_BODY"
 ```
 
-Resposta esperada:
-- consistent: true
-- difference: 0.00
-- checkedEntries: X
+Esperado: `status PROCESSED`, `balance 975.00`, `idempotentReplay false`.
 
-Isso confirma que o saldo guardado no banco bate com o saldo calculado pelo histórico.
-
-## Passo 12: verificar outbox e inbox
-
-O projeto trabalha com filas para processamento assíncrono.
-
-### Outbox
-- guarda eventos pendentes depois da transação
-- depois são enviados para a fila
-
-### Inbox
-- guarda mensagens recebidas
-- evita processamento duplicado
-
-Você pode testar manualmente:
-- POST /queues/outbox/publish
-- POST /queues/inbox/consume
-
-### Exemplo de outbox
+Sem o header `Idempotency-Key`, deve ser recusado:
 
 ```bash
-curl -X POST http://localhost:3000/queues/outbox/publish \
-  -H "Content-Type: application/json" \
-  -d '{"limit":10}'
+curl -s -w "\nHTTP %{http_code}\n" -X POST $API/wagering/transactions \
+  -H "Content-Type: application/json" -d "$BET_BODY"
 ```
 
-Resposta esperada:
-- lista de eventos publicados
-- cada evento com status e tentativa
+Esperado: `HTTP 400`.
 
-### Exemplo de inbox
+## Passo 8: replay idempotente (mesmo pedido de novo)
 
 ```bash
-curl -X POST http://localhost:3000/queues/inbox/consume \
+curl -s -w "\nHTTP %{http_code}\n" -X POST $API/wagering/transactions \
   -H "Content-Type: application/json" \
-  -d '{"consumerName":"demo-consumer","messageId":"msg-live-1","payload":{"walletId":"SUA_WALLET_ID_AQUI","amount":"25.00"}}'
+  -H "Idempotency-Key: $TX_KEY" \
+  -d "$BET_BODY"
 ```
 
-Resposta esperada:
-- false em primeiro processamento
-- true em repetição
+Esperado: o **mesmo** `transactionId`, `balance 975.00` e `idempotentReplay true`. O saldo **não** cai para 950.00.
 
-Explicando: isso significa que a primeira vez processa; a segunda vez reconhece que já foi consumida.
+Prove no banco que existe só um débito:
 
-## Passo 13: verificar métricas
-
-Endpoint:
-
-```http
-GET /metrics
+```bash
+psqlc "select direction, amount, balance_before, balance_after from wallet_ledger_entries where wallet_id = '$WALLET_ID' order by seq;"
 ```
 
-Essa rota mostra contadores internos, por exemplo:
-- idempotency.replay
-- idempotency.payload_conflict
-- wager.transaction.processed
-- wallet.created
+Esperado: 2 linhas (CREDIT 1000.00 da abertura e um único DEBIT 25.00).
 
-Isso ajuda a saber o que aconteceu no sistema sem olhar o banco diretamente.
+## Passo 9: conflito de payload (mesma chave, valor diferente)
 
-## Passo 14: cenário de sucesso esperado
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X POST $API/wagering/transactions \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $TX_KEY" \
+  -d "${BET_BODY/25.00/30.00}"
+```
 
-Se tudo estiver funcionando, a sequência correta é:
-1. cria wallet
-2. cria aposta
-3. saldo cai
-4. ledger registra movimento
-5. outbox cria evento
-6. evento sai para fila
-7. replay com mesma chave retorna mesma resposta
-8. payload diferente com mesma chave falha
-9. reconciliação confirma saldo correto
+Esperado: `HTTP 409` e mensagem de chave já usada com payload diferente.
 
-## Resumo final
+Mesma `externalTransactionId` com **outra** chave também deve dar conflito:
 
-Esse projeto é uma simulação de um sistema financeiro distribuído com foco em:
-- integridade de dinheiro
-- segurança de transações
-- concorrência
-- falha de processamento
-- processamento assíncrono
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X POST $API/wagering/transactions \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: provider-a:outra-chave-$RUN" \
+  -d "$BET_BODY"
+```
 
-O ponto mais importante é:
-- mesmo quando algo acontece em paralelo ou chega duas vezes, o sistema tenta manter o saldo correto e o histórico confiável
+Esperado: `HTTP 409`.
 
-## Observações finais
+## Passo 10: histórico (ledger) e consultas
 
-- Para a demo, é melhor usar wallets novas para evitar confusão com saldos de outras execuções
-- Sempre use um Idempotency-Key único para cada operação nova
-- O projeto foi pensado para ser correto financeiramente antes de ser um sistema de produção completo
+```bash
+curl -s "$API/wallets/$WALLET_ID/ledger?limit=50" | pj
+```
 
-## Dica extra
+Esperado: as entradas com tipo, valor, saldo antes, saldo depois e data (a abertura de 1000.00 e o débito de 25.00).
 
-Se quiser automatizar a demo, você pode rodar uma sequência de comandos em shell e validar cada etapa em ordem. O objetivo principal é observar que o sistema se comporta corretamente mesmo com duplicidade e concorrência.
+Consultar a transação pelos dois caminhos:
+
+```bash
+curl -s $API/providers/provider-a/wagering/transactions/$TX_ID | pj
+```
+
+Para usar o id interno da transação:
+
+```bash
+export TRANSACTION_ID=$(curl -s $API/providers/provider-a/wagering/transactions/$TX_ID | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+curl -s $API/wagering/transactions/$TRANSACTION_ID | pj
+```
+
+Se `TRANSACTION_ID` sair vazio, o nome do campo no JSON é outro (provavelmente `transactionId`): olhe a resposta do comando anterior e ajuste o `grep`.
+
+## Passo 11: saldo = soma do ledger (a invariante principal)
+
+Direto no banco, o saldo guardado deve ser igual ao saldo reconstruído pelo extrato:
+
+```bash
+psqlc "select w.balance as saldo_guardado, coalesce(sum(case l.direction when 'CREDIT' then l.amount else -l.amount end), 0) as saldo_pelo_ledger from wallets w left join wallet_ledger_entries l on l.wallet_id = w.id where w.id = '$WALLET_ID' group by w.id;"
+```
+
+Esperado: as duas colunas iguais (975.00).
+
+Pela API de reconciliação:
+
+```bash
+curl -s -X POST $API/wallets/$WALLET_ID/reconciliation \
+  -H "Content-Type: application/json" \
+  -d '{"storedBalance":{"amount":"975.00","currency":"BRL"},"calculatedBalance":{"amount":"975.00","currency":"BRL"}}' | pj
+```
+
+Esperado: `consistent true`, `difference 0.00` e `checkedEntries` com o número de lançamentos.
+
+## Passo 12: WIN e LOSS
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X POST $API/wagering/transactions \
+  -H "Content-Type: application/json" -H "Idempotency-Key: provider-a:win-$RUN" \
+  -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"win-$RUN\",\"playerId\":\"$PLAYER_ID\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"round-$RUN\",\"gameId\":\"fortune-chimp\",\"kind\":\"WIN\",\"money\":{\"amount\":\"50.00\",\"currency\":\"BRL\"}}"
+```
+
+Esperado: `PROCESSED`, saldo 1025.00.
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X POST $API/wagering/transactions \
+  -H "Content-Type: application/json" -H "Idempotency-Key: provider-a:loss-$RUN" \
+  -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"loss-$RUN\",\"playerId\":\"$PLAYER_ID\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"round-$RUN\",\"gameId\":\"fortune-chimp\",\"kind\":\"LOSS\",\"money\":{\"amount\":\"0.00\",\"currency\":\"BRL\"}}"
+```
+
+Esperado: `PROCESSED`, saldo **inalterado** e nenhum lançamento novo no ledger.
+
+Aposta sem saldo suficiente (rejeição de negócio, não erro):
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X POST $API/wagering/transactions \
+  -H "Content-Type: application/json" -H "Idempotency-Key: provider-a:big-$RUN" \
+  -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"big-$RUN\",\"playerId\":\"$PLAYER_ID\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"round-$RUN\",\"gameId\":\"fortune-chimp\",\"kind\":\"BET\",\"money\":{\"amount\":\"999999.00\",\"currency\":\"BRL\"}}"
+```
+
+Esperado: `REJECTED` com um código de falha (`INSUFFICIENT_FUNDS`), saldo inalterado.
+
+## Passo 13: REFUND, ROLLBACK e referência fora de ordem
+
+> **Estado atual:** estes cenários ainda não estão concluídos na implementação atual.
+> O endpoint pode registrar `REFUND`/`ROLLBACK` como `PENDING`, mas ainda não executa
+> automaticamente o estorno, a proteção `ALREADY_REVERSED` ou o reprocessamento de
+> referência fora de ordem. Não use esta seção como critério de sucesso até essa
+> funcionalidade ser implementada.
+
+Estorno da aposta do passo 7:
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X POST $API/wagering/transactions \
+  -H "Content-Type: application/json" -H "Idempotency-Key: provider-a:refund-$RUN" \
+  -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"refund-$RUN\",\"playerId\":\"$PLAYER_ID\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"round-$RUN\",\"gameId\":\"fortune-chimp\",\"kind\":\"REFUND\",\"referenceExternalTransactionId\":\"$TX_ID\",\"money\":{\"amount\":\"25.00\",\"currency\":\"BRL\"}}"
+```
+
+Esperado: `PROCESSED` e o saldo sobe 25.00.
+
+Reversão da mesma aposta de novo (deve ser recusada):
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X POST $API/wagering/transactions \
+  -H "Content-Type: application/json" -H "Idempotency-Key: provider-a:refund2-$RUN" \
+  -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"refund2-$RUN\",\"playerId\":\"$PLAYER_ID\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"round-$RUN\",\"gameId\":\"fortune-chimp\",\"kind\":\"REFUND\",\"referenceExternalTransactionId\":\"$TX_ID\",\"money\":{\"amount\":\"25.00\",\"currency\":\"BRL\"}}"
+```
+
+Esperado: `REJECTED` com `ALREADY_REVERSED`.
+
+Estorno que chega **antes** da aposta original (referência ausente):
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X POST $API/wagering/transactions \
+  -H "Content-Type: application/json" -H "Idempotency-Key: provider-a:early-refund-$RUN" \
+  -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"early-refund-$RUN\",\"playerId\":\"$PLAYER_ID\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"round-late\",\"gameId\":\"fortune-chimp\",\"kind\":\"REFUND\",\"referenceExternalTransactionId\":\"late-bet-$RUN\",\"money\":{\"amount\":\"10.00\",\"currency\":\"BRL\"}}"
+```
+
+Esperado: `HTTP 202` com status `PENDING_REFERENCE`. Agora envie a aposta que faltava:
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X POST $API/wagering/transactions \
+  -H "Content-Type: application/json" -H "Idempotency-Key: provider-a:late-bet-$RUN" \
+  -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"late-bet-$RUN\",\"playerId\":\"$PLAYER_ID\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"round-late\",\"gameId\":\"fortune-chimp\",\"kind\":\"BET\",\"money\":{\"amount\":\"10.00\",\"currency\":\"BRL\"}}"
+```
+
+Aguarde o worker de pendências (alguns segundos) e confira o estado final:
+
+```bash
+sleep 15
+psqlc "select external_transaction_id, kind, status, failure_code from wager_transactions where wallet_id = '$WALLET_ID' order by created_at;"
+```
+
+Esperado: o `early-refund-...` virou `PROCESSED`.
+
+## Passo 14: o cenário obrigatório do desafio (duas apostas simultâneas)
+
+Carteira com 100.00 e duas apostas de 80.00 ao mesmo tempo:
+
+```bash
+export P2=$(cat /proc/sys/kernel/random/uuid)
+export W2=$(curl -s -X POST $API/wallets -H "Content-Type: application/json" \
+  -d "{\"playerId\":\"$P2\",\"initialBalance\":{\"amount\":\"100.00\",\"currency\":\"BRL\"}}" \
+  | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "W2=$W2"
+```
+
+```bash
+for i in 1 2; do
+  curl -s -w "  HTTP %{http_code}\n" -X POST $API/wagering/transactions \
+    -H "Content-Type: application/json" -H "Idempotency-Key: provider-a:race-$RUN-$i" \
+    -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"race-$RUN-$i\",\"playerId\":\"$P2\",\"walletId\":\"$W2\",\"roundId\":\"round-race\",\"gameId\":\"fortune-chimp\",\"kind\":\"BET\",\"money\":{\"amount\":\"80.00\",\"currency\":\"BRL\"}}" &
+done
+wait
+```
+
+Esperado: **exatamente uma** `PROCESSED` e **uma** `REJECTED` (saldo insuficiente). Confirme:
+
+```bash
+psqlc "select balance from wallets where id = '$W2';"
+psqlc "select direction, amount, balance_before, balance_after from wallet_ledger_entries where wallet_id = '$W2' order by seq;"
+```
+
+Esperado: saldo `20.00` e o ledger com o CREDIT de abertura e **um único DEBIT**.
+
+## Passo 15: a mesma aposta 50 vezes em paralelo
+
+```bash
+export P3=$(cat /proc/sys/kernel/random/uuid)
+export W3=$(curl -s -X POST $API/wallets -H "Content-Type: application/json" \
+  -d "{\"playerId\":\"$P3\",\"initialBalance\":{\"amount\":\"1000.00\",\"currency\":\"BRL\"}}" \
+  | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+export BODY50="{\"providerId\":\"provider-a\",\"externalTransactionId\":\"same-$RUN\",\"playerId\":\"$P3\",\"walletId\":\"$W3\",\"roundId\":\"round-same\",\"gameId\":\"fortune-chimp\",\"kind\":\"BET\",\"money\":{\"amount\":\"25.00\",\"currency\":\"BRL\"}}"
+```
+
+```bash
+seq 1 50 | xargs -P 50 -I{} curl -s -o /dev/null -w "%{http_code}\n" -X POST $API/wagering/transactions \
+  -H "Content-Type: application/json" -H "Idempotency-Key: provider-a:same-$RUN" -d "$BODY50" | sort | uniq -c
+```
+
+Esperado: nenhum `500`; o resto são respostas de sucesso e de replay. Prova no banco:
+
+```bash
+psqlc "select count(*) as debitos from wallet_ledger_entries where wallet_id = '$W3' and direction = 'DEBIT';"
+psqlc "select balance from wallets where id = '$W3';"
+```
+
+Esperado: `debitos = 1` e saldo `975.00`.
+
+## Passo 16: constraints do banco (as garantias estão no schema)
+
+Cada comando abaixo **deve falhar**:
+
+```bash
+psqlc "insert into wallets (id, player_id, currency, balance) values (gen_random_uuid(), gen_random_uuid(), 'BRL', -1.00);"
+psqlc "update wallet_ledger_entries set amount = 1.00;"
+psqlc "delete from wallet_ledger_entries;"
+psqlc "truncate wallet_ledger_entries;"
+```
+
+Esperado, na ordem: violação de `wallets_balance_non_negative`; e `wallet_ledger_entries is append-only` nos três últimos.
+
+Script completo de verificação (se existir no projeto):
+
+```bash
+docker compose exec -T postgres psql -U wagering -d wagering < scripts/constraint-checks.sql
+```
+
+## Passo 17: outbox, inbox e filas
+
+Eventos gravados na outbox (e se já foram publicados):
+
+```bash
+psqlc "select seq, event_type, attempts, published_at from outbox_messages order by seq desc limit 10;"
+```
+
+Publicar os pendentes manualmente:
+
+```bash
+curl -s -X POST $API/queues/outbox/publish \
+  -H "Content-Type: application/json" -d '{"limit":10}' | pj
+psqlc "select count(*) filter (where published_at is null) as pendentes, count(*) filter (where published_at is not null) as publicados from outbox_messages;"
+```
+
+Inbox: primeira vez processa, repetição é reconhecida:
+
+```bash
+for i in 1 2; do
+  curl -s -X POST $API/queues/inbox/consume \
+    -H "Content-Type: application/json" \
+    -d "{\"consumerName\":\"demo-consumer\",\"messageId\":\"msg-$RUN\",\"payload\":{\"walletId\":\"$WALLET_ID\",\"amount\":\"25.00\"}}"
+  echo
+done
+psqlc "select consumer_name, message_id, processed_at from inbox_messages order by received_at desc limit 5;"
+```
+
+Esperado: `false` na primeira chamada e `true` na segunda, e **uma só** linha no inbox.
+
+Filas no emulador (o formato exato pode variar com a versão do MiniStack; se falhar, ignore):
+
+```bash
+curl -s "http://localhost:4566/?Action=ListQueues"; echo
+```
+
+## Passo 18: métricas
+
+```bash
+curl -s $API/metrics | head -40
+```
+
+Contadores esperados (os nomes podem variar): `idempotency.replay`, `idempotency.payload_conflict`, `wager.transaction.processed`, `wallet.created`.
+
+## Passo 19: testes automatizados
+
+```bash
+bun run typecheck
+bun test
+```
+
+## Se algo der errado
+
+| Sintoma                                       | Causa provável                      | Comando / solução                                                   |
+| --------------------------------------------- | ----------------------------------- | ------------------------------------------------------------------- |
+| `relation "..." does not exist` no log do app | migrations não rodaram neste banco  | `bun run scripts/migrate.ts`                                        |
+| `\dt` mostra "Did not find any relations"     | banco vazio (volume novo)           | `bun run scripts/migrate.ts`                                        |
+| `pendentes antes: []` em banco novo           | executor não achou as migrations    | conferir `migrations/index.ts` (`migrationsList`)                   |
+| `404 Wallet not found`                        | `WALLET_ID` vazio ou de outro banco | `psqlc "select id, player_id from wallets;"`                        |
+| `WALLET_ID=` vazio                            | a criação falhou                    | reler o JSON do passo 6                                             |
+| `409` ao criar carteira                       | jogador já tem carteira em BRL      | gerar outro: `export PLAYER_ID=$(cat /proc/sys/kernel/random/uuid)` |
+| `Connection refused` no curl                  | app não está rodando                | `bun run src/main.ts` no terminal 1                                 |
+| porta 5432 ou 3000 em uso                     | outro processo usando a porta       | `docker ps` e `ss -ltnp \| grep -E '5432\|3000'`                    |
+| `command not found` em `pj` ou `psqlc`        | terminal novo ou fora do bash       | rodar `bash` e refazer o passo 4                                    |
+
+Resetar tudo (apaga os dados de desenvolvimento):
+
+```bash
+docker compose down -v
+docker compose up -d
+bun run scripts/migrate.ts
+```
+
+Ver logs dos serviços:
+
+```bash
+docker compose logs --tail 50 postgres
+docker compose logs --tail 50 localstack
+```
+
+## Observações
+
+- Para a demo, use carteiras novas (o passo 4 já gera um jogador novo a cada execução).
+- Toda operação nova precisa de uma `Idempotency-Key` única; aqui ela é composta com `RUN`.
+- O ledger não aceita `UPDATE`, `DELETE` nem `TRUNCATE`. Para zerar o ambiente, use o `down -v` acima.

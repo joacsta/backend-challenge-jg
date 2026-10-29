@@ -7,3 +7,5 @@ done
 
 awslocal sqs create-queue --queue-name wagering-outbox >/dev/null 2>&1 || true
 awslocal sqs create-queue --queue-name wagering-inbox >/dev/null 2>&1 || true
+awslocal sqs create-queue --queue-name wagering-outbox-dlq >/dev/null 2>&1 || true
+awslocal sqs create-queue --queue-name wagering-inbox-dlq >/dev/null 2>&1 || true

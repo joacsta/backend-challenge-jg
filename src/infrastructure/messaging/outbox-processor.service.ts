@@ -74,7 +74,10 @@ export class OutboxProcessorService {
             continue;
           }
 
-          message.nextAttemptAt = this.calculateNextAttemptAt(nextAttempts, now);
+          message.nextAttemptAt = this.calculateNextAttemptAt(
+            nextAttempts,
+            now,
+          );
           results.push({
             id: message.id,
             eventType: message.eventType,
@@ -91,7 +94,9 @@ export class OutboxProcessorService {
     });
   }
 
-  private async publishToTransport(message: OutboxMessageEntity): Promise<void> {
+  private async publishToTransport(
+    message: OutboxMessageEntity,
+  ): Promise<void> {
     await this.sqsTransport.publish(message);
   }
 

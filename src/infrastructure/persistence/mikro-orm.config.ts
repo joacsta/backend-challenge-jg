@@ -8,7 +8,8 @@ import { InboxMessageEntity } from "./entities/inbox-message.entity";
 import { OutboxMessageEntity } from "./entities/outbox-message.entity";
 
 export const DATABASE_URL =
-  process.env.DATABASE_URL ?? "postgresql://wagering:wagering@localhost:5432/wagering";
+  process.env.DATABASE_URL ??
+  "postgresql://wagering:wagering@localhost:5432/wagering";
 
 export default defineConfig({
   clientUrl: DATABASE_URL,

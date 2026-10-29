@@ -3,10 +3,18 @@ import { WalletApplicationService } from "../application/wallet/wallet-applicati
 
 @Controller("wallets")
 export class WalletController {
-  constructor(private readonly walletApplicationService: WalletApplicationService) {}
+  constructor(
+    private readonly walletApplicationService: WalletApplicationService,
+  ) {}
 
   @Post()
-  async createWallet(@Body() body: { playerId: string; initialBalance: { amount: string; currency: string } }) {
+  async createWallet(
+    @Body()
+    body: {
+      playerId: string;
+      initialBalance: { amount: string; currency: string };
+    },
+  ) {
     return this.walletApplicationService.createWallet({
       playerId: body.playerId,
       initialBalance: body.initialBalance,
@@ -24,14 +32,26 @@ export class WalletController {
     @Query("cursor") cursor?: string,
     @Query("limit") limit?: string,
   ) {
-    return this.walletApplicationService.findLedger(walletId, cursor, Number(limit ?? 50));
+    return this.walletApplicationService.findLedger(
+      walletId,
+      cursor,
+      Number(limit ?? 50),
+    );
   }
 
   @Post(":walletId/reconciliation")
   async reconcileWallet(
     @Param("walletId") walletId: string,
-    @Body() body: { storedBalance: { amount: string; currency: string }; calculatedBalance: { amount: string; currency: string } },
+    @Body()
+    body: {
+      storedBalance: { amount: string; currency: string };
+      calculatedBalance: { amount: string; currency: string };
+    },
   ) {
-    return this.walletApplicationService.reconcileWallet(walletId, body.storedBalance, body.calculatedBalance);
+    return this.walletApplicationService.reconcileWallet(
+      walletId,
+      body.storedBalance,
+      body.calculatedBalance,
+    );
   }
 }

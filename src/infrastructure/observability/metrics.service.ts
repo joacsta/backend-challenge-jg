@@ -12,6 +12,10 @@ export class MetricsService {
   }
 
   snapshot(): Record<string, number> {
-    return Object.fromEntries([...this.counters.entries()].sort(([left], [right]) => left.localeCompare(right)));
+    return Object.fromEntries(
+      [...this.counters.entries()].sort(([left], [right]) =>
+        left.localeCompare(right),
+      ),
+    );
   }
 }

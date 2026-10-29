@@ -10,7 +10,10 @@ export const OutboxMessageEntitySchema = defineEntity({
     payload: p.json().fieldName("payload"),
     occurredAt: p.datetime().fieldName("occurred_at").defaultRaw("now()"),
     attempts: p.integer().default(0),
-    nextAttemptAt: p.datetime().fieldName("next_attempt_at").defaultRaw("now()"),
+    nextAttemptAt: p
+      .datetime()
+      .fieldName("next_attempt_at")
+      .defaultRaw("now()"),
     publishedAt: p.datetime().nullable().fieldName("published_at"),
   },
   indexes: [

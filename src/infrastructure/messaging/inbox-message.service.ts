@@ -1,4 +1,4 @@
-import { EntityManager } from "@mikro-orm/core";
+import { EntityManager, LockMode } from "@mikro-orm/core";
 import { ConflictException, Injectable } from "@nestjs/common";
 import { createHash } from "node:crypto";
 import { InboxMessageEntity } from "../persistence/entities/inbox-message.entity";
@@ -29,46 +29,47 @@ export class InboxMessageService {
     const payloadHash = this.payloadHash(envelope.payload);
 
     return this.em.transactional(async (tx: EntityManager) => {
-      const existing = await tx.findOne(InboxMessageEntity, {
-        consumerName: envelope.consumerName,
-        messageId: envelope.messageId,
-      });
+      // ON CONFLICT keeps concurrent redeliveries from aborting the transaction
+      // with a primary-key violation. The loser then waits here for the winner
+      // and observes its committed row.
+      await tx.getConnection().execute(
+        `insert into inbox_messages (consumer_name, message_id, payload_hash, received_at)
+         values (?, ?, ?, now())
+         on conflict (consumer_name, message_id) do nothing`,
+        [envelope.consumerName, envelope.messageId, payloadHash],
+        "run",
+        tx.getTransactionContext(),
+      );
 
-      if (existing?.processedAt) {
-        if (existing.payloadHash !== payloadHash) {
-          throw new ConflictException(
-            "Message payload hash mismatch for the same consumer/message id",
-          );
-        }
-        this.metrics.increment("inbox.redelivery");
-        return true;
-      }
-
-      if (!existing) {
-        tx.create(InboxMessageEntity, {
+      const received = await tx.findOne(
+        InboxMessageEntity,
+        {
           consumerName: envelope.consumerName,
           messageId: envelope.messageId,
-          payloadHash,
-          receivedAt: new Date(),
-        });
-        await tx.flush();
+        },
+        { lockMode: LockMode.PESSIMISTIC_WRITE },
+      );
+
+      if (!received) {
+        throw new Error("Inbox message row is missing after insert");
       }
 
-      if (existing && existing.payloadHash !== payloadHash) {
+      if (received.payloadHash !== payloadHash) {
         this.metrics.increment("inbox.payload_conflict");
         throw new ConflictException(
           "Message payload hash mismatch for the same consumer/message id",
         );
       }
 
+      if (received.processedAt) {
+        this.metrics.increment("inbox.redelivery");
+        return true;
+      }
+
       if (handler) {
         await handler(tx, envelope.payload);
       }
 
-      const received = existing ?? await tx.findOneOrFail(InboxMessageEntity, {
-        consumerName: envelope.consumerName,
-        messageId: envelope.messageId,
-      });
       received.processedAt = new Date();
       await tx.flush();
       return false;

@@ -1,4 +1,5 @@
 import { MikroORM } from "@mikro-orm/core";
+import { ConflictException } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import { WageringApplicationService } from "../../src/application/wagering/wagering-application.service";
 import { WalletApplicationService } from "../../src/application/wallet/wallet-application.service";
@@ -527,5 +528,292 @@ describe("hot wallet concurrency", () => {
     );
     expect(processed.status).toBe("PROCESSED");
     expect(processed.observedBalance?.amount).toBe("100.00");
+  });
+
+  test("same idempotency key racing across wallets only affects one wallet", async () => {
+    const key = `provider-key-race:${randomUUID()}`;
+    const playerA = randomUUID();
+    const playerB = randomUUID();
+    const walletA = await new WalletApplicationService(
+      orm.em.fork(),
+    ).createWallet({
+      playerId: playerA,
+      initialBalance: { amount: "100.00", currency: "BRL" },
+    });
+    const walletB = await new WalletApplicationService(
+      orm.em.fork(),
+    ).createWallet({
+      playerId: playerB,
+      initialBalance: { amount: "100.00", currency: "BRL" },
+    });
+
+    const results = await Promise.allSettled([
+      new WageringApplicationService(orm.em.fork()).submitWager(
+        {
+          providerId: "provider-key-race",
+          externalTransactionId: randomUUID(),
+          playerId: playerA,
+          walletId: walletA.id,
+          roundId: "round-key-race-a",
+          gameId: "game",
+          kind: "BET",
+          money: { amount: "25.00", currency: "BRL" },
+        },
+        key,
+      ),
+      new WageringApplicationService(orm.em.fork()).submitWager(
+        {
+          providerId: "provider-key-race",
+          externalTransactionId: randomUUID(),
+          playerId: playerB,
+          walletId: walletB.id,
+          roundId: "round-key-race-b",
+          gameId: "game",
+          kind: "BET",
+          money: { amount: "25.00", currency: "BRL" },
+        },
+        key,
+      ),
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled").length).toBe(
+      1,
+    );
+    const rejected = results.find((result) => result.status === "rejected");
+    expect(
+      rejected?.status === "rejected" &&
+        rejected.reason instanceof ConflictException,
+    ).toBe(true);
+
+    const wallets = await orm.em.fork().find(WalletEntity, {
+      id: { $in: [walletA.id, walletB.id] },
+    });
+    expect(wallets.map((wallet) => wallet.balance).sort().join(",")).toBe(
+      "100.00,75.00",
+    );
+    const debits = await orm.em.fork().find(WalletLedgerEntryEntity, {
+      walletId: { $in: [walletA.id, walletB.id] },
+      direction: "DEBIT",
+    });
+    expect(debits.length).toBe(1);
+  });
+
+  test("same external transaction id racing under different keys only affects one wallet", async () => {
+    const providerId = "provider-external-race";
+    const externalTransactionId = randomUUID();
+    const playerA = randomUUID();
+    const playerB = randomUUID();
+    const walletA = await new WalletApplicationService(
+      orm.em.fork(),
+    ).createWallet({
+      playerId: playerA,
+      initialBalance: { amount: "100.00", currency: "BRL" },
+    });
+    const walletB = await new WalletApplicationService(
+      orm.em.fork(),
+    ).createWallet({
+      playerId: playerB,
+      initialBalance: { amount: "100.00", currency: "BRL" },
+    });
+
+    const results = await Promise.allSettled([
+      new WageringApplicationService(orm.em.fork()).submitWager(
+        {
+          providerId,
+          externalTransactionId,
+          playerId: playerA,
+          walletId: walletA.id,
+          roundId: "round-external-race-a",
+          gameId: "game",
+          kind: "BET",
+          money: { amount: "25.00", currency: "BRL" },
+        },
+        `${providerId}:key-a:${randomUUID()}`,
+      ),
+      new WageringApplicationService(orm.em.fork()).submitWager(
+        {
+          providerId,
+          externalTransactionId,
+          playerId: playerB,
+          walletId: walletB.id,
+          roundId: "round-external-race-b",
+          gameId: "game",
+          kind: "BET",
+          money: { amount: "25.00", currency: "BRL" },
+        },
+        `${providerId}:key-b:${randomUUID()}`,
+      ),
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled").length).toBe(
+      1,
+    );
+    const rejected = results.find((result) => result.status === "rejected");
+    expect(
+      rejected?.status === "rejected" &&
+        rejected.reason instanceof ConflictException,
+    ).toBe(true);
+
+    const wallets = await orm.em.fork().find(WalletEntity, {
+      id: { $in: [walletA.id, walletB.id] },
+    });
+    expect(wallets.map((wallet) => wallet.balance).sort().join(",")).toBe(
+      "100.00,75.00",
+    );
+  });
+
+  test("REFUND and ROLLBACK racing for the same reference reverse it only once", async () => {
+    const providerId = "provider-reversal-race";
+    const playerId = randomUUID();
+    const wallet = await new WalletApplicationService(
+      orm.em.fork(),
+    ).createWallet({
+      playerId,
+      initialBalance: { amount: "100.00", currency: "BRL" },
+    });
+
+    const bet = await new WageringApplicationService(
+      orm.em.fork(),
+    ).submitWager(
+      {
+        providerId,
+        externalTransactionId: "bet-reversal-race",
+        playerId,
+        walletId: wallet.id,
+        roundId: "round-reversal-race",
+        gameId: "game",
+        kind: "BET",
+        money: { amount: "25.00", currency: "BRL" },
+      },
+      `${providerId}:bet-reversal-race`,
+    );
+    expect(bet.status).toBe("PROCESSED");
+
+    const [refund, rollback] = await Promise.all([
+      new WageringApplicationService(orm.em.fork()).submitWager(
+        {
+          providerId,
+          externalTransactionId: "refund-reversal-race",
+          playerId,
+          walletId: wallet.id,
+          roundId: "round-reversal-race",
+          gameId: "game",
+          kind: "REFUND",
+          referenceExternalTransactionId: "bet-reversal-race",
+          money: { amount: "25.00", currency: "BRL" },
+        },
+        `${providerId}:refund-reversal-race`,
+      ),
+      new WageringApplicationService(orm.em.fork()).submitWager(
+        {
+          providerId,
+          externalTransactionId: "rollback-reversal-race",
+          playerId,
+          walletId: wallet.id,
+          roundId: "round-reversal-race",
+          gameId: "game",
+          kind: "ROLLBACK",
+          referenceExternalTransactionId: "bet-reversal-race",
+          money: { amount: "25.00", currency: "BRL" },
+        },
+        `${providerId}:rollback-reversal-race`,
+      ),
+    ]);
+
+    const outcomes = [refund, rollback];
+    expect(
+      outcomes.filter((outcome) => outcome.status === "PROCESSED").length,
+    ).toBe(1);
+    const rejected = outcomes.filter((outcome) => outcome.status === "REJECTED");
+    expect(rejected.length).toBe(1);
+    const rejectedTransaction = await new WageringApplicationService(
+      orm.em.fork(),
+    ).findTransactionById(rejected[0]!.transactionId);
+    expect(rejectedTransaction.failureCode).toBe("ALREADY_REVERSED");
+
+    const finalWallet = await orm.em.fork().findOne(WalletEntity, {
+      id: wallet.id,
+    });
+    expect(finalWallet?.balance).toBe("100.00");
+    const entries = await orm.em.fork().find(WalletLedgerEntryEntity, {
+      walletId: wallet.id,
+    });
+    expect(entries.length).toBe(3);
+  });
+
+  test("concurrent duplicate inbox delivery runs the handler exactly once", async () => {
+    const envelope: InboxEnvelope<{ operation: string }> = {
+      consumerName: "concurrent-inbox",
+      messageId: randomUUID(),
+      payload: { operation: "debit" },
+    };
+    let handled = 0;
+    const handler = async () => {
+      handled += 1;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    };
+
+    const results = await Promise.all([
+      new InboxMessageService(orm.em.fork(), new MetricsService()).consume(
+        envelope,
+        handler,
+      ),
+      new InboxMessageService(orm.em.fork(), new MetricsService()).consume(
+        envelope,
+        handler,
+      ),
+    ]);
+
+    expect(handled).toBe(1);
+    expect(results.filter((result) => result === false).length).toBe(1);
+    expect(results.filter((result) => result === true).length).toBe(1);
+
+    const persisted = await orm.em.fork().findOne(InboxMessageEntity, {
+      consumerName: envelope.consumerName,
+      messageId: envelope.messageId,
+    });
+    expect(persisted?.processedAt).toBeDefined();
+  });
+
+  test("duplicate pending-reference requests do not increment attempts before they are due", async () => {
+    const providerId = "provider-pending-attempts";
+    const playerId = randomUUID();
+    const wallet = await new WalletApplicationService(
+      orm.em.fork(),
+    ).createWallet({
+      playerId,
+      initialBalance: { amount: "100.00", currency: "BRL" },
+    });
+    const input = {
+      providerId,
+      externalTransactionId: "refund-pending-attempts",
+      playerId,
+      walletId: wallet.id,
+      roundId: "round-pending-attempts",
+      gameId: "game",
+      kind: "REFUND" as const,
+      referenceExternalTransactionId: "missing-pending-reference",
+      money: { amount: "10.00", currency: "BRL" },
+    };
+    const key = `${providerId}:refund-pending-attempts`;
+
+    const pending = await new WageringApplicationService(
+      orm.em.fork(),
+    ).submitWager(input, key);
+    expect(pending.status).toBe("PENDING_REFERENCE");
+
+    const duplicates = await Promise.all([
+      new WageringApplicationService(orm.em.fork()).submitWager(input, key),
+      new WageringApplicationService(orm.em.fork()).submitWager(input, key),
+    ]);
+    expect(duplicates.map((result) => result.status).join(",")).toBe(
+      "PENDING_REFERENCE,PENDING_REFERENCE",
+    );
+    expect(duplicates.every((result) => result.idempotentReplay)).toBe(true);
+
+    const stored = await orm.em.fork().findOne(WagerTransactionEntity, {
+      id: pending.transactionId,
+    });
+    expect(stored?.attempts).toBe(1);
   });
 });

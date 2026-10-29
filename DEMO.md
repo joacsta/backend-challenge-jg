@@ -262,11 +262,10 @@ Esperado: `REJECTED` com um código de falha (`INSUFFICIENT_FUNDS`), saldo inalt
 
 ## Passo 13: REFUND, ROLLBACK e referência fora de ordem
 
-> **Estado atual:** estes cenários ainda não estão concluídos na implementação atual.
-> O endpoint pode registrar `REFUND`/`ROLLBACK` como `PENDING`, mas ainda não executa
-> automaticamente o estorno, a proteção `ALREADY_REVERSED` ou o reprocessamento de
-> referência fora de ordem. Não use esta seção como critério de sucesso até essa
-> funcionalidade ser implementada.
+`REFUND` e `ROLLBACK` são processados com validação da referência, proteção contra
+reversão duplicada e registro no ledger/outbox. Quando a referência ainda não
+existe, a transação fica em `PENDING_REFERENCE` e o worker tenta novamente com
+backoff.
 
 Estorno da aposta do passo 7:
 
@@ -296,7 +295,7 @@ curl -s -w "\nHTTP %{http_code}\n" -X POST $API/wagering/transactions \
   -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"early-refund-$RUN\",\"playerId\":\"$PLAYER_ID\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"round-late\",\"gameId\":\"fortune-chimp\",\"kind\":\"REFUND\",\"referenceExternalTransactionId\":\"late-bet-$RUN\",\"money\":{\"amount\":\"10.00\",\"currency\":\"BRL\"}}"
 ```
 
-Esperado: `HTTP 202` com status `PENDING_REFERENCE`. Agora envie a aposta que faltava:
+Esperado: status `PENDING_REFERENCE`. Agora envie a aposta que faltava:
 
 ```bash
 curl -s -w "\nHTTP %{http_code}\n" -X POST $API/wagering/transactions \
@@ -304,7 +303,7 @@ curl -s -w "\nHTTP %{http_code}\n" -X POST $API/wagering/transactions \
   -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"late-bet-$RUN\",\"playerId\":\"$PLAYER_ID\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"round-late\",\"gameId\":\"fortune-chimp\",\"kind\":\"BET\",\"money\":{\"amount\":\"10.00\",\"currency\":\"BRL\"}}"
 ```
 
-Aguarde o worker de pendências (alguns segundos) e confira o estado final:
+Aguarde o worker de pendências (o primeiro retry usa backoff) e confira o estado final:
 
 ```bash
 sleep 15

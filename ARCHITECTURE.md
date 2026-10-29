@@ -353,3 +353,16 @@ A arquitetura foi pensada para resolver o problema real do sistema financeiro di
 - o inbox evita reprocessamento duplicado de mensagens.
 
 Essa combinação é o que torna o sistema robusto o suficiente para um desafio de arquitetura de apostas distribuídas.
+
+## 13. Limitações e escolhas conscientes
+
+- Autenticação não foi implementada: o README trata esse item como opcional e sem
+  pontuação. Os endpoints de health permanecem públicos.
+- A integração usa AWS SDK v2 porque é suficiente para o desafio e para o
+  LocalStack; a aplicação registra o aviso de fim de suporte da dependência.
+- O publisher do outbox publica no SQS enquanto mantém a transação e o lock do
+  lote. Isso evita que dois publishers selecionem o mesmo evento, mas mantém a
+  transação aberta durante a chamada externa.
+- O envio ao SQS continua sendo at-least-once: se o processo cair depois da
+  publicação e antes do commit, o evento pode ser publicado novamente. O
+  consumidor deve ser idempotente, como o inbox implementado neste projeto.

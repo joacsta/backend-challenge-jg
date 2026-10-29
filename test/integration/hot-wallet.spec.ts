@@ -8,6 +8,11 @@ import { WagerTransactionEntity } from "../../src/infrastructure/persistence/ent
 import { OutboxMessageEntity } from "../../src/infrastructure/persistence/entities/outbox-message.entity";
 import { OutboxProcessorService } from "../../src/infrastructure/messaging/outbox-processor.service";
 import { MetricsService } from "../../src/infrastructure/observability/metrics.service";
+import {
+  InboxMessageService,
+  type InboxEnvelope,
+} from "../../src/infrastructure/messaging/inbox-message.service";
+import { InboxMessageEntity } from "../../src/infrastructure/persistence/entities/inbox-message.entity";
 import ormConfig from "../../src/infrastructure/persistence/mikro-orm.config";
 
 describe("hot wallet concurrency", () => {
@@ -255,6 +260,103 @@ describe("hot wallet concurrency", () => {
       id: message.id,
     });
     expect(persisted?.publishedAt).toBeDefined();
+  });
+
+  test("redelivers an inbox message after a failure before commit", async () => {
+    const inbox = new InboxMessageService(
+      orm.em.fork(),
+      new MetricsService(),
+    );
+    const envelope: InboxEnvelope<{ operation: string }> = {
+      consumerName: "recovery-test",
+      messageId: randomUUID(),
+      payload: { operation: "debit" },
+    };
+
+    let failed = false;
+    try {
+      await inbox.consume(envelope, async () => {
+        failed = true;
+        throw new Error("simulated crash before ack");
+      });
+    } catch (error) {
+      expect(error instanceof Error).toBeTruthy();
+    }
+
+    expect(failed).toBeTruthy();
+    expect(
+      await orm.em.fork().findOne(InboxMessageEntity, {
+        consumerName: envelope.consumerName,
+        messageId: envelope.messageId,
+      }),
+    ).toBeFalsy();
+
+    const redelivery = await inbox.consume(envelope, async () => undefined);
+    expect(redelivery).toBeFalsy();
+
+    const persisted = await orm.em.fork().findOne(InboxMessageEntity, {
+      consumerName: envelope.consumerName,
+      messageId: envelope.messageId,
+    });
+    expect(persisted?.processedAt).toBeDefined();
+  });
+
+  test("a new outbox publisher resumes a failed publication", async () => {
+    await orm.em.getConnection().execute("DELETE FROM outbox_messages");
+    const message = orm.em.fork().create(OutboxMessageEntity, {
+      id: randomUUID(),
+      aggregateId: randomUUID(),
+      eventType: "RecoveryEvent",
+      payload: { eventId: randomUUID() },
+      occurredAt: new Date(),
+      attempts: 0,
+      nextAttemptAt: new Date(),
+      publishedAt: null,
+    });
+    const seedEm = orm.em.fork();
+    seedEm.persist(message);
+    await seedEm.flush();
+
+    const failingTransport = {
+      publish: async () => {
+        throw new Error("simulated publisher crash");
+      },
+      publishDeadLetter: async () => undefined,
+    };
+    const first = new OutboxProcessorService(
+      orm.em.fork(),
+      failingTransport as never,
+      new MetricsService(),
+    );
+    const firstResult = await first.publishNextPending();
+    expect(firstResult[0]?.published).toBeFalsy();
+
+    await orm.em.nativeUpdate(
+      OutboxMessageEntity,
+      { id: message.id },
+      { nextAttemptAt: new Date(0) },
+    );
+
+    let published = 0;
+    const recoveringTransport = {
+      publish: async () => {
+        published += 1;
+      },
+      publishDeadLetter: async () => undefined,
+    };
+    const second = new OutboxProcessorService(
+      orm.em.fork(),
+      recoveringTransport as never,
+      new MetricsService(),
+    );
+    const secondResult = await second.publishNextPending();
+
+    expect(published).toBe(1);
+    expect(secondResult[0]?.published).toBeTruthy();
+    expect(
+      (await orm.em.fork().findOne(OutboxMessageEntity, { id: message.id }))
+        ?.publishedAt,
+    ).toBeDefined();
   });
 
   test("refunds a processed bet only once", async () => {

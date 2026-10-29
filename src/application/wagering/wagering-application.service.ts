@@ -563,7 +563,8 @@ export class WageringApplicationService {
 
   async processPendingReferences(limit = 25): Promise<number> {
     const now = new Date();
-    const pending = await this.em.find(
+    const workerEm = this.em.fork();
+    const pending = await workerEm.find(
       WagerTransactionEntity,
       { status: "PENDING_REFERENCE" },
       { limit, orderBy: { createdAt: "ASC" } },

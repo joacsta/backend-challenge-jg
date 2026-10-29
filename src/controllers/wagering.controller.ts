@@ -4,6 +4,8 @@ import {
   Controller,
   Get,
   Headers,
+  HttpCode,
+  HttpException,
   Param,
   Post,
 } from "@nestjs/common";
@@ -16,6 +18,7 @@ export class WageringController {
   ) {}
 
   @Post("wagering/transactions")
+  @HttpCode(200)
   async submitTransaction(
     @Headers("idempotency-key") idempotencyKeyHeader: string,
     @Headers("x-correlation-id") correlationId: string | undefined,
@@ -36,10 +39,20 @@ export class WageringController {
       throw new BadRequestException("Idempotency-Key header is required");
     }
 
-    return this.wageringApplicationService.submitWager(
+    const result = await this.wageringApplicationService.submitWager(
       { ...body, correlationId },
       idempotencyKeyHeader,
     );
+
+    if (result.status === "PENDING_REFERENCE") {
+      throw new HttpException(result, 202);
+    }
+
+    if (result.status === "REJECTED") {
+      throw new HttpException(result, 422);
+    }
+
+    return result;
   }
 
   @Get("wagering/transactions/:transactionId")

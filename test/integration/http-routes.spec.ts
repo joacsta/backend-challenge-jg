@@ -399,6 +399,54 @@ describe("rotas HTTP financeiras", () => {
     expect(second.body).toBeTruthy();
   });
 
+  test("quando a mesma chave chega para carteiras diferentes, então apenas uma é processada", async () => {
+    const walletA = await request(baseUrl, "/wallets", post(walletPayload()));
+    const walletB = await request(baseUrl, "/wallets", post(walletPayload()));
+    const key = `http:${randomUUID()}`;
+
+    const responses = await Promise.all([
+      request(
+        baseUrl,
+        "/wagering/transactions",
+        post(
+          wagerPayload(walletA.body.id, walletA.body.playerId, {
+            externalTransactionId: randomUUID(),
+          }),
+          { "idempotency-key": key },
+        ),
+      ),
+      request(
+        baseUrl,
+        "/wagering/transactions",
+        post(
+          wagerPayload(walletB.body.id, walletB.body.playerId, {
+            externalTransactionId: randomUUID(),
+          }),
+          { "idempotency-key": key },
+        ),
+      ),
+    ]);
+
+    expect(responses.filter((response) => response.status === 200).length).toBe(
+      1,
+    );
+    expect(responses.filter((response) => response.status === 409).length).toBe(
+      1,
+    );
+
+    const balances = await Promise.all(
+      [walletA, walletB].map((wallet) =>
+        request(baseUrl, `/wallets/${wallet.body.id}`),
+      ),
+    );
+    expect(
+      balances
+        .map((response) => response.body.balance.amount)
+        .sort()
+        .join(","),
+    ).toBe("100.00,75.00");
+  });
+
   test("quando a rota de transação não recebe chave de idempotência, então rejeita a requisição", async () => {
     const response = await request(
       baseUrl,

@@ -1,4 +1,8 @@
-import { EntityManager, LockMode } from "@mikro-orm/core";
+import {
+  EntityManager,
+  LockMode,
+  UniqueConstraintViolationException,
+} from "@mikro-orm/core";
 import {
   ConflictException,
   Injectable,
@@ -35,6 +39,19 @@ export interface SubmitWagerInput {
   referenceExternalTransactionId?: string;
   correlationId?: string;
 }
+
+export interface SubmitWagerResult {
+  transactionId: string;
+  status: string;
+  balance: { amount: string; currency: string };
+  idempotentReplay: boolean;
+}
+
+const REPLAYABLE_UNIQUE_CONSTRAINTS = new Set([
+  "wt_idempotency_uq",
+  "wt_external_uq",
+  "ledger_one_entry_per_tx_uq",
+]);
 
 @Injectable()
 export class WageringApplicationService {
@@ -150,24 +167,16 @@ export class WageringApplicationService {
 
       if (resolvedExisting.status !== "PENDING_REFERENCE") {
         this.metrics.increment("idempotency.replay");
-        return {
-          transactionId: resolvedExisting.id,
-          status: resolvedExisting.status,
-          balance: {
-            amount: resolvedExisting.observedBalance ?? "0.00",
-            currency: resolvedExisting.currency,
-          },
-          idempotentReplay: true,
-        };
+        return this.replayResult(resolvedExisting);
+      }
+
+      if (!this.isReferenceAttemptDue(resolvedExisting)) {
+        this.metrics.increment("idempotency.replay");
+        return this.replayResult(resolvedExisting);
       }
     }
 
-    let result: {
-      transactionId: string;
-      status: string;
-      balance: { amount: string; currency: string };
-      idempotentReplay: boolean;
-    };
+    let result: SubmitWagerResult;
 
     const process = async (tx: EntityManager) => {
       const wallet = await tx.findOne(
@@ -189,6 +198,21 @@ export class WageringApplicationService {
 
       const current = currentByKey ?? currentByExternalId;
       if (current) {
+        if (
+          currentByExternalId &&
+          currentByExternalId.idempotencyKey !== idempotencyKey
+        ) {
+          throw new ConflictException(
+            "External transaction already exists with a different idempotency key",
+          );
+        }
+
+        if (current.walletId !== wallet.id) {
+          throw new ConflictException(
+            "Idempotency key already used for a different wallet",
+          );
+        }
+
         if (current.payloadHash !== payloadHash) {
           this.metrics.increment("idempotency.payload_conflict");
           this.logger.warn("idempotency.payload_conflict", {
@@ -203,15 +227,13 @@ export class WageringApplicationService {
 
         if (current.status !== "PENDING_REFERENCE") {
           this.metrics.increment("idempotency.replay");
-          result = {
-            transactionId: current.id,
-            status: current.status,
-            balance: {
-              amount: current.observedBalance ?? "0.00",
-              currency: current.currency,
-            },
-            idempotentReplay: true,
-          };
+          result = this.replayResult(current);
+          return;
+        }
+
+        if (!this.isReferenceAttemptDue(current)) {
+          this.metrics.increment("idempotency.replay");
+          result = this.replayResult(current);
           return;
         }
       }
@@ -311,7 +333,7 @@ export class WageringApplicationService {
 
         const alreadyReversed = await tx.findOne(WagerTransactionEntity, {
           referenceTransactionId: reference.id,
-          kind: input.kind,
+          kind: { $in: ["REFUND", "ROLLBACK"] },
           status: "PROCESSED",
         });
         if (alreadyReversed) {
@@ -545,12 +567,115 @@ export class WageringApplicationService {
       if (this.isLockConflict(error)) {
         this.metrics.increment("wallet.lock_conflict");
       }
+
+      const constraint = this.uniqueConstraintName(error);
+      if (constraint === "wt_single_reversal_uq") {
+        throw new ConflictException("Transaction already reversed");
+      }
+
+      if (constraint && !transactionManager) {
+        const recovered = await this.recoverFromUniqueViolation(
+          input,
+          idempotencyKey,
+          payloadHash,
+          constraint,
+        );
+        if (recovered) {
+          this.metrics.observe(
+            "wager.processing_latency_ms",
+            Date.now() - startedAt,
+          );
+          this.metrics.increment(
+            `wager.status.${recovered.status.toLowerCase()}`,
+          );
+          return recovered;
+        }
+      }
+
       throw error;
     }
 
     this.metrics.observe("wager.processing_latency_ms", Date.now() - startedAt);
     this.metrics.increment(`wager.status.${result!.status.toLowerCase()}`);
     return result!;
+  }
+
+  private async recoverFromUniqueViolation(
+    input: SubmitWagerInput,
+    idempotencyKey: string,
+    payloadHash: string,
+    constraint: string,
+  ): Promise<SubmitWagerResult | undefined> {
+    if (!REPLAYABLE_UNIQUE_CONSTRAINTS.has(constraint)) {
+      return undefined;
+    }
+
+    const reader = this.em.fork();
+    const existingByKey = await reader.findOne(WagerTransactionEntity, {
+      idempotencyKey,
+    });
+    const existingByExternalId = await reader.findOne(WagerTransactionEntity, {
+      providerId: input.providerId,
+      externalTransactionId: input.externalTransactionId,
+    });
+
+    if (
+      existingByExternalId &&
+      existingByExternalId.idempotencyKey !== idempotencyKey
+    ) {
+      throw new ConflictException(
+        "External transaction already exists with a different idempotency key",
+      );
+    }
+
+    const existing = existingByKey ?? existingByExternalId;
+    if (!existing) {
+      return undefined;
+    }
+
+    if (existing.payloadHash !== payloadHash) {
+      this.metrics.increment("idempotency.payload_conflict");
+      this.logger.warn("idempotency.payload_conflict", {
+        idempotencyKey,
+        providerId: input.providerId,
+        externalTransactionId: input.externalTransactionId,
+      });
+      throw new ConflictException(
+        "Idempotency key already used with different payload",
+      );
+    }
+
+    this.metrics.increment("idempotency.replay");
+    return this.replayResult(existing);
+  }
+
+  private uniqueConstraintName(error: unknown): string | undefined {
+    if (!(error instanceof UniqueConstraintViolationException)) {
+      return undefined;
+    }
+
+    const constraint = (error as { constraint?: unknown }).constraint;
+    return typeof constraint === "string" ? constraint : undefined;
+  }
+
+  private replayResult(
+    transaction: WagerTransactionEntity,
+  ): SubmitWagerResult {
+    return {
+      transactionId: transaction.id,
+      status: transaction.status,
+      balance: {
+        amount: transaction.observedBalance ?? "0.00",
+        currency: transaction.currency,
+      },
+      idempotentReplay: true,
+    };
+  }
+
+  private isReferenceAttemptDue(transaction: WagerTransactionEntity): boolean {
+    return (
+      !transaction.nextAttemptAt || transaction.nextAttemptAt <= new Date()
+    );
   }
 
   private isLockConflict(error: unknown): boolean {

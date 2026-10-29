@@ -89,8 +89,14 @@ export class SqsInboxConsumerService {
         }
 
         const envelope: InboxEnvelope<unknown> = {
-          consumerName: body.consumerName ?? "sqs-inbox",
-          messageId: body.messageId ?? message.MessageId ?? body.id,
+          consumerName:
+            typeof body.consumerName === "string"
+              ? body.consumerName
+              : "sqs-inbox",
+          messageId: resolveInboxMessageId(
+            body as Record<string, unknown>,
+            message.MessageId,
+          ),
           payload: body.payload ?? body,
         };
 
@@ -233,6 +239,35 @@ export class SqsInboxConsumerService {
       idempotencyKey,
     };
   }
+}
+
+/**
+ * Picks the most stable identifier available. SQS assigns a new MessageId on
+ * every publish, so it must be the last resort: a republished outbox event
+ * would otherwise bypass inbox deduplication.
+ */
+export function resolveInboxMessageId(
+  body: Record<string, unknown>,
+  sqsMessageId?: string,
+): string {
+  const payload =
+    body.payload && typeof body.payload === "object"
+      ? (body.payload as Record<string, unknown>)
+      : undefined;
+  const candidates = [
+    body.messageId,
+    body.id,
+    payload?.eventId,
+    sqsMessageId,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.length > 0) {
+      return candidate;
+    }
+  }
+
+  return "unknown";
 }
 
 class PermanentMessageError extends Error {}

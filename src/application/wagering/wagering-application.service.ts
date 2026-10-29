@@ -17,6 +17,7 @@ import { WalletLedgerEntryEntity } from "../../infrastructure/persistence/entiti
 import { OutboxMessageEntity } from "../../infrastructure/persistence/entities/outbox-message.entity";
 import { MetricsService } from "../../infrastructure/observability/metrics.service";
 import { StructuredLoggerService } from "../../infrastructure/observability/structured-logger.service";
+import { stableStringify } from "../../shared/stable-stringify";
 import {
   IntegrationEvent,
   WagerTransactionPendingReference,
@@ -272,6 +273,7 @@ export class WageringApplicationService {
         if (!reference) {
           const attempts = (oneTx.attempts ?? 0) + 1;
           oneTx.attempts = attempts;
+          oneTx.observedBalance = wallet.balance;
           if (attempts >= this.maxReferenceAttempts()) {
             oneTx.status = "REJECTED";
             oneTx.failureCode = "REFERENCE_NOT_FOUND";
@@ -729,7 +731,7 @@ export class WageringApplicationService {
 
   makePayloadHash(payload: Record<string, unknown>): string {
     return createHash("sha256")
-      .update(this.stableStringify(payload))
+      .update(stableStringify(payload))
       .digest("hex");
   }
 
@@ -857,31 +859,5 @@ export class WageringApplicationService {
         ? { failureCode: transaction.failureCode }
         : {}),
     };
-  }
-
-  private stableStringify(value: unknown): string {
-    if (value === undefined) {
-      return "null";
-    }
-
-    if (value === null) {
-      return "null";
-    }
-
-    if (Array.isArray(value)) {
-      return `[${value.map((item) => this.stableStringify(item)).join(",")}]`;
-    }
-
-    if (typeof value === "object") {
-      const entries = Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(
-          ([key, nested]) =>
-            `${JSON.stringify(key)}:${this.stableStringify(nested)}`,
-        );
-      return `{${entries.join(",")}}`;
-    }
-
-    return JSON.stringify(value);
   }
 }

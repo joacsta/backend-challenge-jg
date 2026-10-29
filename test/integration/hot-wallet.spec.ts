@@ -1,4 +1,4 @@
-import { MikroORM } from "@mikro-orm/core";
+import { MikroORM, type EntityManager } from "@mikro-orm/core";
 import { ConflictException } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import { WageringApplicationService } from "../../src/application/wagering/wagering-application.service";
@@ -801,6 +801,7 @@ describe("hot wallet concurrency", () => {
       orm.em.fork(),
     ).submitWager(input, key);
     expect(pending.status).toBe("PENDING_REFERENCE");
+    expect(pending.balance.amount).toBe("100.00");
 
     const duplicates = await Promise.all([
       new WageringApplicationService(orm.em.fork()).submitWager(input, key),
@@ -810,10 +811,191 @@ describe("hot wallet concurrency", () => {
       "PENDING_REFERENCE,PENDING_REFERENCE",
     );
     expect(duplicates.every((result) => result.idempotentReplay)).toBe(true);
+    expect(duplicates.map((result) => result.balance.amount).join(",")).toBe(
+      "100.00,100.00",
+    );
 
     const stored = await orm.em.fork().findOne(WagerTransactionEntity, {
       id: pending.transactionId,
     });
     expect(stored?.attempts).toBe(1);
+  });
+
+  test("applies a wager event delivered twice sequentially only once", async () => {
+    const playerId = randomUUID();
+    const wallet = await new WalletApplicationService(
+      orm.em.fork(),
+    ).createWallet({
+      playerId,
+      initialBalance: { amount: "100.00", currency: "BRL" },
+    });
+    const providerId = "provider-inbox-sequential";
+    const externalTransactionId = randomUUID();
+    const input = {
+      providerId,
+      externalTransactionId,
+      playerId,
+      walletId: wallet.id,
+      roundId: "round-inbox-sequential",
+      gameId: "game",
+      kind: "BET" as const,
+      money: { amount: "25.00", currency: "BRL" },
+    };
+    const key = `${providerId}:${externalTransactionId}`;
+    const envelope: InboxEnvelope<typeof input> = {
+      consumerName: "wager-inbox-sequential",
+      messageId: randomUUID(),
+      payload: input,
+    };
+    let handled = 0;
+    const handler = async (tx: EntityManager, payload: typeof input) => {
+      handled += 1;
+      await new WageringApplicationService(orm.em.fork()).submitWager(
+        payload,
+        key,
+        tx,
+      );
+    };
+    const inbox = new InboxMessageService(
+      orm.em.fork(),
+      new MetricsService(),
+    );
+
+    expect(await inbox.consume(envelope, handler)).toBe(false);
+    expect(await inbox.consume(envelope, handler)).toBe(true);
+
+    expect(handled).toBe(1);
+    const finalWallet = await orm.em.fork().findOne(WalletEntity, {
+      id: wallet.id,
+    });
+    const entries = await orm.em.fork().find(WalletLedgerEntryEntity, {
+      walletId: wallet.id,
+      direction: "DEBIT",
+    });
+    expect(finalWallet?.balance).toBe("75.00");
+    expect(entries.length).toBe(1);
+  });
+
+  test("applies a wager event delivered twice simultaneously only once", async () => {
+    const playerId = randomUUID();
+    const wallet = await new WalletApplicationService(
+      orm.em.fork(),
+    ).createWallet({
+      playerId,
+      initialBalance: { amount: "100.00", currency: "BRL" },
+    });
+    const providerId = "provider-inbox-concurrent";
+    const externalTransactionId = randomUUID();
+    const input = {
+      providerId,
+      externalTransactionId,
+      playerId,
+      walletId: wallet.id,
+      roundId: "round-inbox-concurrent",
+      gameId: "game",
+      kind: "BET" as const,
+      money: { amount: "25.00", currency: "BRL" },
+    };
+    const key = `${providerId}:${externalTransactionId}`;
+    const envelope: InboxEnvelope<typeof input> = {
+      consumerName: "wager-inbox-concurrent",
+      messageId: randomUUID(),
+      payload: input,
+    };
+    let handled = 0;
+    const handler = async (tx: EntityManager, payload: typeof input) => {
+      handled += 1;
+      await new WageringApplicationService(orm.em.fork()).submitWager(
+        payload,
+        key,
+        tx,
+      );
+    };
+
+    const results = await Promise.all([
+      new InboxMessageService(
+        orm.em.fork(),
+        new MetricsService(),
+      ).consume(envelope, handler),
+      new InboxMessageService(
+        orm.em.fork(),
+        new MetricsService(),
+      ).consume(envelope, handler),
+    ]);
+
+    expect(handled).toBe(1);
+    expect(results.filter((result) => result === false).length).toBe(1);
+    expect(results.filter((result) => result === true).length).toBe(1);
+
+    const finalWallet = await orm.em.fork().findOne(WalletEntity, {
+      id: wallet.id,
+    });
+    const entries = await orm.em.fork().find(WalletLedgerEntryEntity, {
+      walletId: wallet.id,
+      direction: "DEBIT",
+    });
+    expect(finalWallet?.balance).toBe("75.00");
+    expect(entries.length).toBe(1);
+  });
+
+  test("rejects the same inbox message id when a nested payload changes", async () => {
+    const consumerName = "inbox-nested-conflict";
+    const messageId = randomUUID();
+    const inbox = new InboxMessageService(
+      orm.em.fork(),
+      new MetricsService(),
+    );
+
+    expect(
+      await inbox.consume({
+        consumerName,
+        messageId,
+        payload: { data: { amount: "10.00", currency: "BRL" } },
+      }),
+    ).toBe(false);
+
+    let conflict: unknown;
+    try {
+      await inbox.consume({
+        consumerName,
+        messageId,
+        payload: { data: { amount: "20.00", currency: "BRL" } },
+      });
+    } catch (error) {
+      conflict = error;
+    }
+
+    expect(conflict instanceof ConflictException).toBe(true);
+  });
+
+  test("treats reordered nested keys as the same inbox payload", async () => {
+    const consumerName = "inbox-nested-replay";
+    const messageId = randomUUID();
+    const inbox = new InboxMessageService(
+      orm.em.fork(),
+      new MetricsService(),
+    );
+
+    expect(
+      await inbox.consume({
+        consumerName,
+        messageId,
+        payload: {
+          data: { amount: "10.00", currency: "BRL" },
+          meta: { beta: 2, alpha: 1 },
+        },
+      }),
+    ).toBe(false);
+
+    expect(
+      await inbox.consume({
+        consumerName,
+        messageId,
+        payload: {
+          meta: { alpha: 1, beta: 2 },
+          data: { currency: "BRL", amount: "10.00" },
+        },
+      }),
+    ).toBe(true);
   });
 });

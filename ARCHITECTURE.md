@@ -286,6 +286,19 @@ A chave geralmente é composta por:
 
 Isso é importante porque filas e mensagerias podem entregar a mesma mensagem mais de uma vez.
 
+O ID usado na inbox é o identificador estável do evento (`id`/`eventId` do envelope
+ou do payload), nunca o `MessageId` atribuído pelo SQS, que muda a cada publicação.
+O `payload_hash` é calculado com JSON canônico recursivo, então a mesma carga com
+chaves em ordem diferente é replay, enquanto a mesma mensagem com conteúdo
+diferente é conflito. A gravação da inbox, o handler financeiro, o ledger e o
+outbox participam da mesma transação SQL; o `ack` só ocorre depois do commit.
+
+Este projeto não recebe webhook de gateway externo (Stripe ou equivalente). A
+entrada de mensagens é o SQS, tratado como canal interno confiável, e as rotas
+HTTP internas de fila usam `x-api-key`. Se um gateway externo for adicionado, a
+verificação da assinatura deve acontecer sobre o corpo bruto antes do parse do
+JSON.
+
 ### 8.3 Eventos versionados
 
 Os eventos publicados pelo outbox usam subclasses de `IntegrationEvent`, cada uma

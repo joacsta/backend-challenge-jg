@@ -8,8 +8,11 @@ declare function expect(value: unknown): {
   toBeDefined(): void;
   toBeTruthy(): void;
   toBeFalsy(): void;
+  toBeGreaterThan(expected: number): void;
   toBeGreaterThanOrEqual(expected: number): void;
   toBeLessThan(expected: number): void;
+  toBeNull(): void;
+  toMatch(expected: RegExp): void;
   not: {
     toBe(expected: unknown): void;
   };

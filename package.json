@@ -5,7 +5,7 @@
   "private": true,
   "scripts": {
     "typecheck": "bun check",
-    "test": "bun test"
+    "test": "docker compose up -d postgres-test localstack && DATABASE_URL=postgresql://wagering:wagering@localhost:5433/wagering_test bun test"
   },
   "devDependencies": {
     "@mikro-orm/cli": "^7.2.5",

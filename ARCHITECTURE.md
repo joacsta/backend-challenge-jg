@@ -240,6 +240,27 @@ Sem atomicidade, o sistema fica inconsistente e difícil de recuperar.
 
 Esse conjunto é a base da integridade do sistema financeiro.
 
+### 7.1 Camadas do serviço de apostas
+
+`WageringApplicationService` permanece como fachada e ponto de entrada HTTP. A
+orquestração do caso de uso foi dividida em módulos pequenos, sem framework e
+sem estado global, em `src/application/wagering/`:
+
+- `wagering-events.ts`: monta o contexto do evento e os dados da transação;
+- `wagering-reference-policy.ts`: valida a transação de referência, decide a
+  direção do estorno, o backoff e o limite de tentativas;
+- `wagering-idempotency.ts`: projeta o payload, calcula o hash, decide replay ou
+  conflito e monta o resultado de replay;
+- `wagering-balance-policy.ts`: calcula os movimentos de BET, WIN e das
+  reversões, incluindo a rejeição por saldo insuficiente;
+- `wagering-transaction-store.ts`: concentra as consultas, locks, criação de
+  ledger e enfileiramento no outbox;
+- `wagering-transaction-pipeline.ts`: executa o efeito financeiro dentro da
+  transação já aberta, recebendo `EntityManager`, `MetricsService` e logger.
+
+A fachada continua responsável por hash, pré-checagem de idempotência, abertura
+da transação, recuperação de violações únicas e métricas de latência/status.
+
 ## 10. Reconciliação e observabilidade
 
 A reconciliação usa o saldo materializado apenas como valor armazenado e

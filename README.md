@@ -336,7 +336,7 @@ curl -s -w "\nHTTP %{http_code}\n" -X POST $API/wagering/transactions \
 Aguarde o worker de pendências (o primeiro retry usa backoff) e confira o estado final:
 
 ```bash
-sleep 15
+sleep 20
 psqlc "select external_transaction_id, kind, status, failure_code from wager_transactions where wallet_id = '$WALLET_ID' order by created_at;"
 ```
 
